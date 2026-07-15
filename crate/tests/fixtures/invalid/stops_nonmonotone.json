@@ -1,0 +1,5 @@
+{ "version": 1, "size": { "width": 64, "height": 64 },
+  "root": { "kind": "shape", "key": "dot",
+    "geometry": { "kind": "rect", "x": 0, "y": 0, "width": 64, "height": 64 },
+    "fill": { "kind": "linearGradient", "x1": 0, "y1": 0, "x2": 0, "y2": 64,
+      "stops": [ { "at": 0.8, "color": "#FF0000" }, { "at": 0.2, "color": "#00FF00" } ] } } }

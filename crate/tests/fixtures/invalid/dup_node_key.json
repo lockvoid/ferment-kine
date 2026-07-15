@@ -1,0 +1,8 @@
+{ "version": 1, "size": { "width": 64, "height": 64 },
+  "root": { "kind": "group", "key": "g", "children": [
+    { "kind": "shape", "key": "dot",
+      "geometry": { "kind": "rect", "x": 0, "y": 0, "width": 10, "height": 10 },
+      "fill": { "kind": "solid", "color": "#FF0000" } },
+    { "kind": "shape", "key": "dot",
+      "geometry": { "kind": "rect", "x": 20, "y": 0, "width": 10, "height": 10 },
+      "fill": { "kind": "solid", "color": "#00FF00" } } ] } }

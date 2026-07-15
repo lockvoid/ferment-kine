@@ -1,0 +1,7 @@
+{ "version": 1, "size": { "width": 64, "height": 64 },
+  "inputs": [ { "key": "activations", "type": "unitArray", "default": [] } ],
+  "root": { "kind": "text", "key": "t", "content": "X Y",
+    "frame": { "x": 0, "y": 0, "width": 64, "height": 64 },
+    "style": { "fontFamily": "Bebas Neue", "size": 20, "fill": "#FFFFFF" } },
+  "animators": [ { "target": "t.glyphs", "property": "color",
+    "weight": { "input": "activations" } } ] }

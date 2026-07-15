@@ -1,0 +1,8 @@
+# Rust build output. Cargo.lock IS committed (it is the reproducibility pin).
+/crate/target/
+
+# Swift xcframework build artifacts (populated by scripts/build-xcframework.sh).
+/swift/KineCore.xcframework/
+/swift/.build/
+
+.DS_Store

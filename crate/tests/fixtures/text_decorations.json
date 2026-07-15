@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "size": { "width": 256, "height": 256 },
+  "inputs": [
+    { "key": "progress", "type": "unit", "default": 0.5 }
+  ],
+  "root": {
+    "kind": "group",
+    "key": "g",
+    "children": [
+      {
+        "kind": "shape",
+        "key": "bg",
+        "geometry": { "kind": "rect", "x": 0, "y": 0, "width": 256, "height": 256 },
+        "fill": {
+          "kind": "radialGradient",
+          "cx": 128, "cy": 128, "r": 180,
+          "stops": [
+            { "at": 0, "color": "#202030" },
+            { "at": 1, "color": "#101018" }
+          ]
+        }
+      },
+      {
+        "kind": "shape",
+        "key": "blob",
+        "geometry": { "kind": "path", "d": "M20 200 C60 120 196 120 236 200 Z" },
+        "fill": { "kind": "solid", "color": "#FF3B3055" }
+      },
+      {
+        "kind": "text",
+        "key": "t",
+        "content": "HEY YOU",
+        "frame": { "x": 8, "y": 88, "width": 240, "height": 80 },
+        "style": {
+          "fontFamily": "Bebas Neue",
+          "size": 40,
+          "align": "center",
+          "valign": "center",
+          "fill": "#FFFFFF",
+          "stroke": { "color": "#000000", "width": 1.5 },
+          "shadow": { "color": "#00000080", "offsetX": 0, "offsetY": 3, "blur": 6 },
+          "pill": { "color": "#FF3B30", "radius": 8, "paddingX": 6, "paddingY": 3 }
+        }
+      }
+    ]
+  },
+  "animators": [
+    {
+      "target": "t.words",
+      "property": "pillOpacity",
+      "weight": { "stagger": { "driver": "progress", "total": 0.5, "from": "end" } },
+      "from": 0.15,
+      "to": 1
+    },
+    {
+      "target": "t.lines",
+      "property": "rotate",
+      "weight": { "stagger": { "driver": "progress", "total": 0, "from": "start" } },
+      "from": -4,
+      "to": 4
+    }
+  ]
+}

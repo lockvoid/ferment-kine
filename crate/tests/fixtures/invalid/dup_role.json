@@ -1,0 +1,5 @@
+{ "version": 1, "size": { "width": 64, "height": 64 },
+  "root": { "kind": "group", "key": "g", "role": "card", "children": [
+    { "kind": "shape", "key": "dot", "role": "card",
+      "geometry": { "kind": "rect", "x": 0, "y": 0, "width": 10, "height": 10 },
+      "fill": { "kind": "solid", "color": "#FF0000" } } ] } }

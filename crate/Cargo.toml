@@ -1,0 +1,42 @@
+[package]
+name = "kine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+# Not published to crates.io while pre-1.0; consumers vendor or pin a git rev.
+publish = false
+description = "A Rust render core for motion documents, over the Vello CPU renderer."
+repository = "https://github.com/lockvoid/ferment-kine"
+
+[lib]
+name = "kine"
+# cdylib: loaded by FFI language bindings. staticlib: linked into native apps.
+# One extern-C surface (include/kine.h) serves both.
+crate-type = ["cdylib", "staticlib"]
+
+[profile.release]
+# Required for catch_unwind at the FFI boundary — a panic must be caught and
+# turned into an error sentinel, never abort the host process. Do NOT set abort.
+panic = "unwind"
+
+[dependencies]
+vello_cpu = { version = "=0.0.9", features = ["text", "png", "multithreading"] }
+# Same version as vello_cpu's own dependency (single copy in the lock); provides
+# the filter-effects types push_layer takes, which vello_cpu doesn't re-export.
+vello_common = "=0.0.9"
+parley = { version = "=0.11", default-features = false, features = ["std"] }
+# Bundled fonts only — no `system` feature, so headless server/iOS never touch a
+# platform font source. Registration goes through the global collection.
+fontique = { version = "=0.11", default-features = false, features = ["std"] }
+# Same crate peniko re-exports (single copy in the lock); eval interpolates in
+# Oklab/Oklch through it without depending on renderer types.
+color = "=0.3.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Wraps parse errors with the failing JSON path ("animators[2].keyframes[0].ease")
+# — the schema contract promises path-carrying errors.
+serde_path_to_error = "0.1"
+
+[dev-dependencies]
+# Decode our own PNG output in tests to assert dimensions + non-transparency.
+png = "0.18"
