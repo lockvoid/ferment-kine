@@ -12,9 +12,9 @@ renders byte-identically on a Linux server and an iPhone (over
 underneath). It is designed for **machine authoring**: the format exists so that
 programs — including AI agents — can *write* motion graphics, not just play them.
 A single Rust core backs native bindings for **Rust, Ruby, Swift, and Kotlin**
-(Kotlin upcoming) — one document, identical pixels, from any of them.
+(upcoming) — one document, identical pixels, from any of them.
 
-<img src="docs/assets/hero.webp" width="800" alt="kine hero — animated karaoke title card">
+<img src="docs/assets/hero.webp" width="400" alt="kine hero — animated karaoke title card">
 
 ## A complete document
 
