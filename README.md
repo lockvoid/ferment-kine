@@ -11,8 +11,10 @@ renders byte-identically on a Linux server and an iPhone (over
 [vello_cpu](https://github.com/linebender/vello) + [parley](https://github.com/linebender/parley)
 underneath). It is designed for **machine authoring**: the format exists so that
 programs — including AI agents — can *write* motion graphics, not just play them.
+A single Rust core backs native bindings for **Rust, Ruby, Swift, and Kotlin**
+(Kotlin upcoming) — one document, identical pixels, from any of them.
 
-![kine hero](docs/assets/hero.webp)
+<img src="docs/assets/hero.webp" width="800" alt="kine hero — animated karaoke title card">
 
 ## A complete document
 
@@ -74,7 +76,7 @@ derivation *is* the document. Swap the `accent` seed and every chip re-derives:
 chip, and `contrast` choosing legible ink on the seed itself — identically on
 every platform. ([`docs/palette.json`](docs/palette.json))
 
-![kine palette](docs/assets/palette.png)
+<img src="docs/assets/palette.png" width="900" alt="kine palette — one seed derived into a full ramp">
 
 ```jsonc
 "colors": [

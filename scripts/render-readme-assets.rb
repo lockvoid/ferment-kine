@@ -58,24 +58,31 @@ def animate(name, json, width, height, seconds:, frames:, fps:, quality: 80, &at
   end
 end
 
-# --- hero: karaoke title card (docs/hero.json) ------------------------------
+# All assets render at 2x their on-page display size (the README pins each <img>
+# to the 1x width) so they stay sharp on retina/HiDPI. Because the browser then
+# downscales by half, WebP compression artifacts vanish — the animations use a
+# lower quality to offset the pixel-count bump. The engine scales the document
+# uniformly to whatever output size we request (render.rs), so 2x is distortion-
+# free. Dimensions below are 2x; the display width is in each comment.
+
+# --- hero: karaoke title card (docs/hero.json) — displays at 800w ------------
 # Still is fully lit, mid idle-wave; the WebP is one fill sweep over the wave.
 hero = doc("hero")
-still("social", hero, 0.6, 800, 260, { progress: 1.0 })
-animate("hero", hero, 800, 260, seconds: 2, frames: 60, fps: 30) do |phase|
+still("social", hero, 0.6, 1600, 520, { progress: 1.0 })
+animate("hero", hero, 1600, 520, seconds: 2, frames: 60, fps: 30, quality: 72) do |phase|
   [phase * 2.4, { progress: [phase * 1.3, 1.0].min }]
 end
 
-# --- palette: one accent → a derived ramp (docs/palette.json) ----------------
+# --- palette: one accent → a derived ramp (docs/palette.json) — displays at 900w
 # Purely a function of the seed colors — no time axis, so the still is the demo.
-still("palette", doc("palette"), 0.0, 900, 248)
+still("palette", doc("palette"), 0.0, 1800, 496)
 
-# --- pulse: all-vector motion mark (docs/pulse.json) -------------------------
+# --- pulse: all-vector motion mark (docs/pulse.json) — displays at 320w -------
 # Spring-scaled core (period 2s) over a linear orbit (period 4s); the loop closes
 # seamlessly at 4s — two pulses per revolution. 30fps, and the still catches the
 # core near the top of its spring overshoot.
 pulse = doc("pulse")
-still("pulse", pulse, 0.56, 480, 480)
-animate("pulse", pulse, 480, 480, seconds: 4, frames: 120, fps: 30, quality: 78) do |phase|
+still("pulse", pulse, 0.56, 640, 640)
+animate("pulse", pulse, 640, 640, seconds: 4, frames: 120, fps: 30, quality: 60) do |phase|
   [phase * 4.0, {}]
 end
