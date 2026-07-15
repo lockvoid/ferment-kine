@@ -1,0 +1,10 @@
+{ "version": 1, "size": { "width": 220, "height": 96 },
+  "inputs": [ { "key": "progress", "type": "unit", "default": 0.5 } ],
+  "root": { "kind": "text", "key": "t", "content": "WAVES",
+    "frame": { "x": 8, "y": 8, "width": 204, "height": 80 },
+    "style": { "fontFamily": "Bebas Neue", "size": 52, "align": "center", "valign": "center", "fill": "#EFEFEF" } },
+  "animators": [
+    { "target": "t.glyphs", "property": "translateY",
+      "weight": { "stagger": { "driver": "progress", "total": 0.6, "from": "start" } }, "from": 18, "to": -18 },
+    { "target": "t.glyphs", "property": "rotate",
+      "weight": { "stagger": { "driver": "progress", "total": 0.6, "from": "start" } }, "from": -12, "to": 12 } ] }

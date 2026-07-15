@@ -11,8 +11,8 @@ use vello_cpu::kurbo::{Affine, BezPath, Point, Rect, Shape as KurboShape};
 
 use crate::schema::SchemaError;
 use crate::schema::{
-    self, Align, Bindable, Composite, Document, Ease, Geometry, Hue, Input, NamedEase, Node, Paint,
-    Slant, StaggerFrom, VAlign, ValueLit, Weight,
+    self, Align, Bindable, ColorExpr, ColorRef, ColorValue, Composite, Document, Ease, Geometry,
+    Hue, Input, NamedEase, Node, Paint, Slant, StaggerFrom, VAlign, ValueLit, Weight,
 };
 use crate::validate::{parse_color, parse_target, prop_type, PropType, UnitLevel};
 
@@ -577,13 +577,16 @@ pub fn resolve_inputs(
 struct Ctx<'a> {
     doc: &'a Document,
     inputs: &'a HashMap<String, InputValue>,
+    colors: &'a HashMap<String, Color>,
 }
 
 pub fn evaluate(doc: &Document, signals: &serde_json::Value, t: f64) -> Result<Scene, SchemaError> {
     let inputs = resolve_inputs(doc, signals, t)?;
+    let colors = resolve_colors(doc, &inputs, signals);
     let ctx = Ctx {
         doc,
         inputs: &inputs,
+        colors: &colors,
     };
     let (root, _bounds) = resolve_node(&ctx, &doc.root)?;
     Ok(Scene {
@@ -615,13 +618,11 @@ impl Ctx<'_> {
         }
     }
 
-    fn color(&self, binding: &Bindable<String>) -> Color {
-        match binding {
-            Bindable::Literal(v) => parse_color(v).expect("validated color literal"),
-            Bindable::Input(key) => match &self.inputs[key.as_str()] {
-                InputValue::Color(c) => *c,
-                _ => AlphaColor::from_rgba8(0, 0, 0, 255),
-            },
+    fn color(&self, value: &ColorValue) -> Color {
+        match value {
+            ColorValue::Literal(v) => parse_color(v).expect("validated color literal"),
+            ColorValue::Input(key) => input_color(self.inputs, key),
+            ColorValue::Color(key) => *self.colors.get(key).expect("validated color reference"),
         }
     }
 
@@ -642,12 +643,129 @@ impl Ctx<'_> {
             Bindable::Literal(ValueLit::Color(s)) => {
                 MapValue::Color(parse_color(s).expect("validated color literal"))
             }
+            Bindable::Literal(ValueLit::ColorRef(key)) => {
+                MapValue::Color(*self.colors.get(key).expect("validated color reference"))
+            }
             Bindable::Input(key) => match (&self.inputs[key.as_str()], property_type) {
                 (InputValue::Color(c), _) => MapValue::Color(*c),
                 (v, _) => MapValue::Num(v.as_number().unwrap_or(0.0)),
             },
         }
     }
+}
+
+fn input_color(inputs: &HashMap<String, InputValue>, key: &str) -> Color {
+    match inputs.get(key) {
+        Some(InputValue::Color(c)) => *c,
+        _ => AlphaColor::from_rgba8(0, 0, 0, 255),
+    }
+}
+
+fn bind_num(binding: &Bindable<f64>, inputs: &HashMap<String, InputValue>) -> f64 {
+    match binding {
+        Bindable::Literal(v) => *v,
+        Bindable::Input(key) => inputs
+            .get(key)
+            .and_then(InputValue::as_number)
+            .unwrap_or(0.0),
+    }
+}
+
+// --- color table (§3) --------------------------------------------------------
+
+/// Resolve the document's color table in declaration order. An entry's
+/// `override` input wins when that signal was actually supplied; otherwise the
+/// computed value is used. Earlier entries are available to later ones.
+fn resolve_colors(
+    doc: &Document,
+    inputs: &HashMap<String, InputValue>,
+    signals: &serde_json::Value,
+) -> HashMap<String, Color> {
+    let supplied = signals.as_object();
+    let mut table: HashMap<String, Color> = HashMap::new();
+    for entry in &doc.colors {
+        let overridden = entry.override_input.as_ref().and_then(|over| {
+            let was_supplied = supplied.is_some_and(|map| map.contains_key(&over.input));
+            match (was_supplied, inputs.get(over.input.as_str())) {
+                (true, Some(InputValue::Color(c))) => Some(*c),
+                _ => None,
+            }
+        });
+        let color = overridden.unwrap_or_else(|| resolve_color_expr(&entry.value, inputs, &table));
+        table.insert(entry.key.clone(), color);
+    }
+    table
+}
+
+fn resolve_color_expr(
+    expr: &ColorExpr,
+    inputs: &HashMap<String, InputValue>,
+    table: &HashMap<String, Color>,
+) -> Color {
+    let space = InterpSpace::default();
+    match expr {
+        ColorExpr::Literal(s) => parse_color(s).expect("validated color literal"),
+        ColorExpr::Input(key) => input_color(inputs, key),
+        ColorExpr::Alpha { of, amount } => with_alpha(
+            resolve_color_ref(of, inputs, table),
+            bind_num(amount, inputs),
+        ),
+        ColorExpr::Contrast { of, candidates } => {
+            let base = resolve_color_ref(of, inputs, table);
+            let poles: Vec<Color> = match candidates {
+                Some(list) => list
+                    .iter()
+                    .map(|r| resolve_color_ref(r, inputs, table))
+                    .collect(),
+                None => vec![
+                    AlphaColor::from_rgba8(0, 0, 0, 255),
+                    AlphaColor::from_rgba8(255, 255, 255, 255),
+                ],
+            };
+            contrast_pick(base, &poles)
+        }
+        ColorExpr::Mix { a, b, t } => lerp_color(
+            resolve_color_ref(a, inputs, table),
+            resolve_color_ref(b, inputs, table),
+            bind_num(t, inputs).clamp(0.0, 1.0),
+            space,
+        ),
+    }
+}
+
+fn resolve_color_ref(
+    reference: &ColorRef,
+    inputs: &HashMap<String, InputValue>,
+    table: &HashMap<String, Color>,
+) -> Color {
+    match reference {
+        ColorRef::Literal(s) => parse_color(s).expect("validated color literal"),
+        ColorRef::Input(key) => input_color(inputs, key),
+        ColorRef::Entry(key) => *table.get(key).expect("validated earlier entry"),
+    }
+}
+
+/// Absolute alpha replacement — rgb unchanged, alpha set to `amount` (§3).
+pub(crate) fn with_alpha(color: Color, amount: f64) -> Color {
+    let mut components = color.components;
+    components[3] = amount.clamp(0.0, 1.0) as f32;
+    AlphaColor::new(components)
+}
+
+/// The candidate whose Oklab lightness is farthest from `base`; ties keep the
+/// earlier candidate (§3 contrast).
+pub(crate) fn contrast_pick(base: Color, candidates: &[Color]) -> Color {
+    let base_l = base.convert::<Oklab>().components[0];
+    let mut best = candidates[0];
+    let mut best_distance = -1.0f32;
+    for candidate in candidates {
+        let distance = (candidate.convert::<Oklab>().components[0] - base_l).abs();
+        if distance > best_distance {
+            best_distance = distance;
+            best = *candidate;
+        }
+    }
+    best
 }
 
 /// Node-level scalar property state, composed over by animators.

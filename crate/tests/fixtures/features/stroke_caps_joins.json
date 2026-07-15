@@ -1,0 +1,8 @@
+{ "version": 1, "size": { "width": 160, "height": 96 },
+  "root": { "kind": "group", "key": "g", "children": [
+    { "kind": "shape", "key": "round",
+      "geometry": { "kind": "path", "d": "M20 24 L80 24 L80 72" },
+      "stroke": { "color": "#22DDAA", "width": 14, "cap": "round", "join": "round" } },
+    { "kind": "shape", "key": "miter",
+      "geometry": { "kind": "path", "d": "M90 24 L140 24 L140 72" },
+      "stroke": { "color": "#DD8822", "width": 14, "cap": "square", "join": "miter" } } ] } }

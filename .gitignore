@@ -6,3 +6,10 @@
 /swift/.build/
 
 .DS_Store
+
+# Ruby gem native artifacts (built by ext/kine/extconf.rb).
+/ruby/lib/kine/libkine.*
+/ruby/ext/kine/Makefile
+/ruby/tmp/
+
+/tmp

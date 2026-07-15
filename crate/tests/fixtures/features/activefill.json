@@ -1,0 +1,8 @@
+{ "version": 1, "size": { "width": 220, "height": 80 },
+  "inputs": [ { "key": "progress", "type": "unit", "default": 0.5 } ],
+  "root": { "kind": "text", "key": "t", "content": "KARAOKE",
+    "frame": { "x": 8, "y": 8, "width": 204, "height": 64 },
+    "style": { "fontFamily": "Bebas Neue", "size": 40, "align": "center", "valign": "center",
+      "fill": "#556677", "activeFill": "#FFDD22" } },
+  "animators": [ { "target": "t.glyphs", "property": "color",
+    "weight": { "stagger": { "driver": "progress", "total": 0.8, "from": "start" } }, "ease": "linear" } ] }

@@ -1,0 +1,6 @@
+# Native library staged by ext/kine/extconf.rb — built per-machine at install.
+lib/kine/libkine.dylib
+lib/kine/libkine.so
+ext/kine/Makefile
+ext/kine/*.o
+tmp/

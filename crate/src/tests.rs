@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use crate::eval::{self, Curve, InterpSpace, MapKey, MapValue, RStagger, ValueMap};
 use crate::schema::{Composite, StaggerFrom};
 use crate::{
-    kine_buf, kine_buf_free, kine_last_error, kine_probe, kine_register_font, kine_render_document,
+    kine_buf, kine_buf_free, kine_document_create, kine_document_free, kine_document_probe,
+    kine_document_render_rgba, kine_last_error, kine_probe, kine_register_font,
+    kine_render_document, kine_render_document_rgba, kine_version,
 };
 
 const FONT: &[u8] = include_bytes!("../testdata/font.ttf");
@@ -52,6 +54,19 @@ fn probe(doc: &str) -> Option<serde_json::Value> {
 }
 
 const PNG_SIGNATURE: &[u8] = &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+// Goldens are byte-exact on the architecture they were generated on (arm64 /
+// NEON). On other arches SIMD rounding can diverge, so there we only check
+// structural validity — the cross-arch bitwise verdict is an informational CI
+// job, not a gate (see README + .github/workflows/ci.yml).
+fn assert_golden(name: &str, png: &[u8], golden: &[u8]) {
+    if cfg!(target_arch = "aarch64") {
+        assert_eq!(png, golden, "{name} diverged from its golden");
+    } else {
+        assert!(png.starts_with(PNG_SIGNATURE), "{name}: not a PNG");
+        assert!(!golden.is_empty(), "{name} golden missing");
+    }
+}
 
 // --- §6 validation table ---------------------------------------------------------
 
@@ -198,6 +213,46 @@ fn invalid_fixtures_report_pathed_errors() {
             include_str!("../tests/fixtures/invalid/karaoke_without_activefill.json"),
             "requires activeFill",
         ),
+        (
+            "color_dup_entry",
+            include_str!("../tests/fixtures/invalid/color_dup_entry.json"),
+            "duplicate color entry key \"a\"",
+        ),
+        (
+            "color_later_ref",
+            include_str!("../tests/fixtures/invalid/color_later_ref.json"),
+            "unknown or later color entry \"b\"",
+        ),
+        (
+            "color_unknown_ref",
+            include_str!("../tests/fixtures/invalid/color_unknown_ref.json"),
+            "unknown or later color entry \"nope\"",
+        ),
+        (
+            "color_unknown_fn",
+            include_str!("../tests/fixtures/invalid/color_unknown_fn.json"),
+            "unknown color function \"lighten\"",
+        ),
+        (
+            "color_amount_oob",
+            include_str!("../tests/fixtures/invalid/color_amount_oob.json"),
+            "within [0, 1]",
+        ),
+        (
+            "color_contrast_one_candidate",
+            include_str!("../tests/fixtures/invalid/color_contrast_one_candidate.json"),
+            "at least 2 candidates",
+        ),
+        (
+            "color_override_noncolor",
+            include_str!("../tests/fixtures/invalid/color_override_noncolor.json"),
+            "expected a color input",
+        ),
+        (
+            "color_value_unknown_ref",
+            include_str!("../tests/fixtures/invalid/color_value_unknown_ref.json"),
+            "unknown color entry \"nope\"",
+        ),
     ];
     for (name, fixture, expected) in table {
         let result = probe(fixture);
@@ -224,9 +279,22 @@ fn probe_reports_the_declared_interface() {
 
     let inputs = interface["inputs"].as_array().unwrap();
     let keys: Vec<&str> = inputs.iter().map(|i| i["key"].as_str().unwrap()).collect();
-    assert_eq!(keys, ["time", "progress", "activations", "font"]);
+    assert_eq!(
+        keys,
+        [
+            "time",
+            "progress",
+            "activations",
+            "font",
+            "foreground",
+            "background",
+            "accent",
+            "borderColor"
+        ]
+    );
     assert_eq!(inputs[0]["type"], "time");
     assert_eq!(inputs[3]["default"], "Bebas Neue");
+    assert_eq!(inputs[4]["type"], "color");
 }
 
 #[test]
@@ -326,10 +394,7 @@ fn golden_renders() {
         }
         let golden = std::fs::read(&path)
             .unwrap_or_else(|_| panic!("{name} missing — run with KINE_REGEN_GOLDENS=1"));
-        assert_eq!(
-            png, golden,
-            "{name} diverged from golden (pinned versions unchanged?)"
-        );
+        assert_golden(name, &png, &golden);
     }
 }
 
@@ -540,5 +605,549 @@ fn input_resolution_clamps_and_wires_t_sugar() {
     assert!(
         matches!(values["time"], eval::InputValue::Time(v) if v == 9.0),
         "explicit time wins"
+    );
+}
+
+// --- version ------------------------------------------------------------------------
+
+#[test]
+fn version_reports_crate_and_schema() {
+    let text = unsafe { std::ffi::CStr::from_ptr(kine_version()) }
+        .to_str()
+        .unwrap();
+    assert!(text.starts_with("kine "), "got: {text:?}");
+    assert!(text.contains(env!("CARGO_PKG_VERSION")));
+    assert!(text.contains("schema v1"));
+}
+
+// --- handles ------------------------------------------------------------------------
+
+fn create(doc: &str) -> i64 {
+    kine_document_create(CString::new(doc).unwrap().as_ptr())
+}
+
+fn render_handle_rgba(handle: i64, t: f64, signals: &str, w: u32, h: u32) -> Option<Vec<u8>> {
+    let signals = CString::new(signals).unwrap();
+    take(kine_document_render_rgba(handle, t, signals.as_ptr(), w, h))
+}
+
+#[test]
+fn handle_lifecycle() {
+    register_font();
+    let handle = create(TEST_CARD);
+    assert!(handle > 0, "create failed: {}", last_error());
+
+    let interface: serde_json::Value = {
+        let bytes = take(kine_document_probe(handle)).expect("probe failed");
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    assert_eq!(interface["roles"], serde_json::json!(["card", "text"]));
+
+    let frame = render_handle_rgba(handle, 0.5, r#"{"progress":0.5}"#, 128, 128)
+        .expect("handle render failed");
+    assert_eq!(frame.len(), 128 * 128 * 4, "RGBA stride = width*4");
+
+    kine_document_free(handle);
+}
+
+#[test]
+fn invalid_document_yields_handle_zero() {
+    let handle = create("{ not json");
+    assert_eq!(handle, 0);
+    assert!(!last_error().is_empty(), "a parse error must be reported");
+
+    let missing = create("{}");
+    assert_eq!(missing, 0);
+    assert!(
+        last_error().contains("missing field"),
+        "got: {:?}",
+        last_error()
+    );
+}
+
+#[test]
+fn use_after_free_errors_never_crashes() {
+    register_font();
+    let handle = create(TEST_CARD);
+    assert!(handle > 0);
+    kine_document_free(handle);
+    kine_document_free(handle); // double free is a no-op
+
+    assert!(render_handle_rgba(handle, 0.0, "{}", 64, 64).is_none());
+    assert!(last_error().contains("freed"), "got: {:?}", last_error());
+    assert!(take(kine_document_probe(handle)).is_none());
+    // Never-issued handle behaves the same.
+    assert!(render_handle_rgba(999_999, 0.0, "{}", 64, 64).is_none());
+}
+
+#[test]
+fn concurrent_renders_one_handle() {
+    register_font();
+    let handle = create(TEST_CARD);
+    assert!(handle > 0);
+    let ok = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let threads: Vec<_> = (0..8)
+        .map(|n| {
+            let ok = ok.clone();
+            std::thread::spawn(move || {
+                for i in 0..20 {
+                    let signals = format!(r#"{{"progress":{}}}"#, (i % 10) as f64 / 10.0);
+                    if render_handle_rgba(handle, n as f64 + i as f64 * 0.01, &signals, 96, 96)
+                        .is_some_and(|f| f.len() == 96 * 96 * 4)
+                    {
+                        ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(ok.load(std::sync::atomic::Ordering::Relaxed), 8 * 20);
+    kine_document_free(handle);
+}
+
+#[test]
+fn concurrent_renders_many_handles() {
+    register_font();
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(|| {
+                let handle = create(TEST_CARD);
+                assert!(handle > 0);
+                for i in 0..15 {
+                    let f = render_handle_rgba(handle, i as f64 * 0.1, "{}", 80, 80).unwrap();
+                    assert_eq!(f.len(), 80 * 80 * 4);
+                }
+                kine_document_free(handle);
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+}
+
+#[test]
+fn handle_cycles_do_not_leak_the_registry() {
+    register_font();
+    // 1000 create/render/free cycles. Assert the registry doesn't retain freed
+    // handles — deterministic and isolation-proof (each id is checked directly,
+    // ids are monotonic/unique), unlike a process-RSS gauge that concurrent
+    // memory-heavy tests pollute.
+    for i in 0..1000 {
+        let handle = create(TEST_CARD);
+        assert!(handle > 0);
+        let _ = render_handle_rgba(handle, i as f64 * 0.001, "{}", 64, 64).unwrap();
+        kine_document_free(handle);
+        assert!(
+            !crate::handle::contains(handle),
+            "handle {handle} still live after free (registry leak)"
+        );
+    }
+}
+
+// --- rgba consistency ---------------------------------------------------------------
+
+const OPAQUE_FILL: &str = include_str!("../tests/fixtures/features/opaque_fill.json");
+const TRANSLUCENT_FILL: &str = include_str!("../tests/fixtures/features/translucent_fill.json");
+
+fn render_rgba(doc: &str, w: u32, h: u32) -> Vec<u8> {
+    let doc = CString::new(doc).unwrap();
+    take(kine_render_document_rgba(
+        doc.as_ptr(),
+        0.0,
+        std::ptr::null(),
+        w,
+        h,
+    ))
+    .unwrap_or_else(|| panic!("rgba render failed: {}", last_error()))
+}
+
+fn decode_png_rgba(png: &[u8]) -> (u32, u32, Vec<u8>) {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png));
+    let mut reader = decoder.read_info().unwrap();
+    let info = reader.info().clone();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+    let frame = reader.next_frame(&mut buf).unwrap();
+    (info.width, info.height, buf[..frame.buffer_size()].to_vec())
+}
+
+fn premul(c: u8, a: u8) -> u8 {
+    ((c as u16 * a as u16 + 127) / 255) as u8
+}
+
+#[test]
+fn opaque_rgba_equals_decoded_png() {
+    // On a fully opaque image, premultiplied == straight, so the raw RGBA bytes
+    // and the decoded PNG bytes are identical.
+    let (w, h) = (64u32, 48u32);
+    let rgba = render_rgba(OPAQUE_FILL, w, h);
+    let png = take(render(OPAQUE_FILL, 0.0, "{}", w, h)).unwrap();
+    let (pw, ph, decoded) = decode_png_rgba(&png);
+    assert_eq!((pw, ph), (w, h));
+    assert!(
+        rgba.chunks_exact(4).all(|px| px[3] == 255),
+        "fixture must be opaque"
+    );
+    assert_eq!(rgba, decoded);
+}
+
+#[test]
+fn translucent_rgba_is_premultiplied() {
+    let (w, h) = (64u32, 48u32);
+    let rgba = render_rgba(TRANSLUCENT_FILL, w, h);
+    let png = take(render(TRANSLUCENT_FILL, 0.0, "{}", w, h)).unwrap();
+    let (_, _, decoded) = decode_png_rgba(&png);
+
+    // rgba is premultiplied; the PNG is straight alpha. Re-premultiplying the
+    // decoded pixels must reproduce the raw bytes (within round-trip rounding).
+    let mut saw_translucent = false;
+    for (raw, straight) in rgba.chunks_exact(4).zip(decoded.chunks_exact(4)) {
+        let a = straight[3];
+        if (1..255).contains(&a) {
+            saw_translucent = true;
+            for ch in 0..3 {
+                assert!(raw[ch] <= a, "premultiplied channel must be <= alpha");
+                let expected = premul(straight[ch], a);
+                assert!(
+                    (raw[ch] as i32 - expected as i32).abs() <= 1,
+                    "premul mismatch: raw {} vs expected {}",
+                    raw[ch],
+                    expected
+                );
+            }
+        }
+    }
+    assert!(saw_translucent, "fixture must have translucent pixels");
+}
+
+// --- fuzz-lite: hostile inputs never abort ------------------------------------------
+
+#[test]
+fn hostile_inputs_error_but_never_abort() {
+    register_font();
+    let big = format!(r#"{{"junk":"{}"}}"#, "x".repeat(1_000_000));
+    let deep = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
+    let huge_array = format!(r#"{{"inputs":[{}]}}"#, "0,".repeat(50_000));
+    let hostile: Vec<&str> = vec![
+        "",
+        "   ",
+        "not json at all",
+        "{",
+        "[1,2,3",
+        "\"unterminated",
+        "{\"version\":}",
+        r#"{"version":1e999}"#,
+        r#"{"version":1,"size":{"width":NaN,"height":10}}"#,
+        r#"{"version":1,"size":{"width":Infinity,"height":10}}"#,
+        "null",
+        "true",
+        "3.14",
+        &big,
+        &deep,
+        &huge_array,
+    ];
+    // Every extern fn taking JSON must return the sentinel (never abort) — the
+    // catch_unwind contract. We only assert we get here alive.
+    for doc in &hostile {
+        assert!(take(render(doc, 0.5, "{}", 32, 32)).is_none());
+        assert!(take(render(doc, 0.5, doc, 32, 32)).is_none() || !doc.is_empty());
+        let d = CString::new(*doc).unwrap_or_else(|_| CString::new("\\x00").unwrap());
+        assert!(take(kine_render_document_rgba(
+            d.as_ptr(),
+            0.0,
+            std::ptr::null(),
+            32,
+            32
+        ))
+        .is_none());
+        assert!(probe(doc).is_none());
+        assert_eq!(create(doc), 0);
+    }
+
+    // Invalid UTF-8 (0xFF) NUL-terminated, straight at the boundary.
+    let bad_utf8: [std::ffi::c_char; 4] = [-1, -2, -3, 0];
+    assert!(take(kine_render_document(
+        bad_utf8.as_ptr(),
+        0.0,
+        std::ptr::null(),
+        32,
+        32
+    ))
+    .is_none());
+    assert!(kine_document_create(bad_utf8.as_ptr()) == 0);
+    assert!(last_error().contains("UTF-8"));
+}
+
+// --- per-feature goldens ------------------------------------------------------------
+
+#[test]
+fn feature_goldens() {
+    register_font();
+    // Enumerated so a new feature without a golden is a visible missing row.
+    let features: &[(&str, &str)] = &[
+        (
+            "linear_gradient",
+            include_str!("../tests/fixtures/features/linear_gradient.json"),
+        ),
+        (
+            "radial_gradient",
+            include_str!("../tests/fixtures/features/radial_gradient.json"),
+        ),
+        (
+            "stroke_caps_joins",
+            include_str!("../tests/fixtures/features/stroke_caps_joins.json"),
+        ),
+        (
+            "opacity_layer",
+            include_str!("../tests/fixtures/features/opacity_layer.json"),
+        ),
+        (
+            "shadow",
+            include_str!("../tests/fixtures/features/shadow.json"),
+        ),
+        ("pill", include_str!("../tests/fixtures/features/pill.json")),
+        (
+            "activefill",
+            include_str!("../tests/fixtures/features/activefill.json"),
+        ),
+        (
+            "glyph_transform",
+            include_str!("../tests/fixtures/features/glyph_transform.json"),
+        ),
+    ];
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/features");
+    let regen = std::env::var_os("KINE_REGEN_GOLDENS").is_some();
+    if regen {
+        std::fs::create_dir_all(&dir).unwrap();
+    }
+    for (name, doc) in features {
+        // Render at the fixture's declared size, with fixed signals so the frame
+        // is deterministic; fixtures without a `progress` input ignore it.
+        let size: serde_json::Value = serde_json::from_str(doc).unwrap();
+        let w = size["size"]["width"].as_u64().unwrap() as u32;
+        let h = size["size"]["height"].as_u64().unwrap() as u32;
+        let png = take(render(doc, 0.0, r#"{"progress":0.6}"#, w, h))
+            .unwrap_or_else(|| panic!("{name} render failed: {}", last_error()));
+        let path = dir.join(format!("{name}.png"));
+        if regen {
+            std::fs::write(&path, &png).unwrap();
+            continue;
+        }
+        let golden = std::fs::read(&path)
+            .unwrap_or_else(|_| panic!("{name} golden missing — run KINE_REGEN_GOLDENS=1"));
+        assert_golden(name, &png, &golden);
+    }
+}
+
+// --- evaluator: remaining gaps ------------------------------------------------------
+
+#[test]
+fn amount_lerps_toward_the_composed_value() {
+    // amount = 0.5 halves the applied delta.
+    assert_eq!(eval::composite_num(2.0, 10.0, Composite::Replace, 0.5), 6.0);
+    assert_eq!(eval::composite_num(2.0, 10.0, Composite::Add, 0.5), 7.0);
+    assert_eq!(eval::composite_num(4.0, 2.0, Composite::Multiply, 0.5), 6.0);
+    assert_eq!(eval::composite_num(5.0, 99.0, Composite::Replace, 0.0), 5.0);
+}
+
+#[test]
+fn stagger_index_mode_uses_declared_order() {
+    let stagger = RStagger {
+        driver_u: 0.5,
+        total: Some(0.5),
+        each: None,
+        from: StaggerFrom::Index,
+        ease: None,
+        seed: 0,
+        indices: vec![2, 0, 1],
+    };
+    let weights = eval::stagger_weights(&stagger, 3);
+    // index 0 has rank 2 (latest), index 1 rank 0 (earliest) → weight[1] leads.
+    assert!(weights[1] >= weights[2] && weights[2] >= weights[0]);
+}
+
+#[test]
+fn activation_arrays_empty_short_long() {
+    let doc = crate::schema::parse(TEST_CARD).unwrap();
+    let compiled = crate::validate::validate(doc).unwrap();
+    let cases = [
+        (r#"{"activations":[]}"#, vec![]),
+        (r#"{"activations":[0.5]}"#, vec![0.5]),
+        (r#"{"activations":[1,2,3]}"#, vec![1.0, 1.0, 1.0]),
+    ];
+    for (json, expected) in cases {
+        let signals: serde_json::Value = serde_json::from_str(json).unwrap();
+        let values = eval::resolve_inputs(&compiled.doc, &signals, 0.0).unwrap();
+        match &values["activations"] {
+            eval::InputValue::UnitArray(a) => assert_eq!(*a, expected, "for {json}"),
+            other => panic!("wrong type: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn time_wraps_exactly_at_period_multiples() {
+    register_font();
+    // The card's wave has period 2; t=0, 2, 4 must be pixel-identical.
+    let a = take(render(TEST_CARD, 0.0, "{}", 96, 96)).unwrap();
+    let b = take(render(TEST_CARD, 2.0, "{}", 96, 96)).unwrap();
+    let c = take(render(TEST_CARD, 4.0, "{}", 96, 96)).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(b, c);
+}
+
+// --- colors (§3) --------------------------------------------------------------
+
+const COLORS_DERIVATION: &str = include_str!("../tests/fixtures/colors_derivation.json");
+
+#[test]
+fn color_alpha_is_absolute() {
+    let red = crate::validate::parse_color("#FF0000").unwrap();
+    let out = eval::with_alpha(red, 0.5);
+    assert!((out.components[3] - 0.5).abs() < 1e-6, "alpha replaced");
+    assert!(
+        (out.components[0] - red.components[0]).abs() < 1e-6,
+        "rgb unchanged"
+    );
+    // Absolute, not multiplicative — a second alpha overwrites, doesn't compound.
+    let out2 = eval::with_alpha(out, 0.2);
+    assert!((out2.components[3] - 0.2).abs() < 1e-6);
+}
+
+#[test]
+fn color_contrast_picks_farthest_lightness_ties_earlier() {
+    use color::{AlphaColor, Oklab};
+    let black = crate::validate::parse_color("#000000").unwrap();
+    let white = crate::validate::parse_color("#FFFFFF").unwrap();
+    let dark = crate::validate::parse_color("#141414").unwrap();
+    let light = crate::validate::parse_color("#EDEDED").unwrap();
+    assert_eq!(
+        eval::contrast_pick(dark, &[black, white]).components,
+        white.components
+    );
+    assert_eq!(
+        eval::contrast_pick(light, &[black, white]).components,
+        black.components
+    );
+
+    // Genuine tie: two candidates at equal Oklab lightness → the earlier wins.
+    let c1 = AlphaColor::<Oklab>::new([0.6, 0.10, 0.0, 1.0]).convert::<color::Srgb>();
+    let c2 = AlphaColor::<Oklab>::new([0.6, -0.10, 0.0, 1.0]).convert::<color::Srgb>();
+    let base = AlphaColor::<Oklab>::new([0.9, 0.0, 0.0, 1.0]).convert::<color::Srgb>();
+    assert_eq!(
+        eval::contrast_pick(base, &[c1, c2]).components,
+        c1.components
+    );
+}
+
+#[test]
+fn color_mix_endpoints_and_midpoint() {
+    let a = crate::validate::parse_color("#000000").unwrap();
+    let b = crate::validate::parse_color("#FFFFFF").unwrap();
+    let space = InterpSpace::default();
+    let at0 = eval::lerp_color(a, b, 0.0, space);
+    let at1 = eval::lerp_color(a, b, 1.0, space);
+    for i in 0..4 {
+        assert!(
+            (at0.components[i] - a.components[i]).abs() < 1e-4,
+            "t=0 is a"
+        );
+        assert!(
+            (at1.components[i] - b.components[i]).abs() < 1e-4,
+            "t=1 is b"
+        );
+    }
+    let mid = eval::lerp_color(a, b, 0.5, space);
+    assert!(
+        mid.components[0] > 0.05 && mid.components[0] < 0.95,
+        "midpoint between"
+    );
+}
+
+#[test]
+fn probe_omits_the_private_color_table() {
+    let interface = probe(TEST_CARD).unwrap();
+    assert!(
+        interface.get("colors").is_none(),
+        "color table must stay private"
+    );
+    let keys: Vec<&str> = interface["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["key"].as_str().unwrap())
+        .collect();
+    // Seeds ARE the published interface.
+    assert!(keys.contains(&"foreground") && keys.contains(&"accent"));
+}
+
+#[test]
+fn colors_derivation_responds_to_seeds() {
+    register_font();
+    let reseeded = r##"{"foreground":"#101014","background":"#F5F0E8","accent":"#12B886"}"##;
+    let default = take(render(COLORS_DERIVATION, 0.0, "{}", 240, 120)).unwrap();
+    let reseed = take(render(COLORS_DERIVATION, 0.0, reseeded, 240, 120)).unwrap();
+    assert!(default.starts_with(PNG_SIGNATURE));
+    assert_ne!(default, reseed, "reseeding must change the derived colors");
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/features");
+    let regen = std::env::var_os("KINE_REGEN_GOLDENS").is_some();
+    for (name, png) in [
+        ("derive_default.png", &default),
+        ("derive_reseeded.png", &reseed),
+    ] {
+        let path = dir.join(name);
+        if regen {
+            std::fs::write(&path, png).unwrap();
+            continue;
+        }
+        let golden = std::fs::read(&path).unwrap_or_else(|_| panic!("{name} missing"));
+        assert_golden(name, png, &golden);
+    }
+}
+
+#[test]
+fn color_override_wins_only_when_supplied() {
+    // The card's `border` = contrast(plateTop) with override borderColor.
+    // Supplying borderColor changes the border; not supplying keeps the derived
+    // value even though the input has a default.
+    register_font();
+    let base = take(render(TEST_CARD, 0.0, r#"{"progress":0.3}"#, 128, 128)).unwrap();
+    let overridden = take(render(
+        TEST_CARD,
+        0.0,
+        r##"{"progress":0.3,"borderColor":"#12B886"}"##,
+        128,
+        128,
+    ))
+    .unwrap();
+    assert_ne!(base, overridden, "supplied override must change the render");
+}
+
+#[test]
+fn render_area_is_capped_not_allocated() {
+    // 65535 passes the per-dimension u16 guard, but 65535x65535 is ~17GB — the
+    // total-area cap must reject it BEFORE allocating (this used to hang/OOM the
+    // process). Rejection is instant; if this test ever hangs, the cap regressed.
+    let buf = render(MINIMAL, 0.0, "{}", 65535, 65535);
+    assert!(
+        take(buf).is_none(),
+        "huge area must be rejected, not allocated"
+    );
+    assert!(last_error().contains("exceeds"), "got: {:?}", last_error());
+    // Just over the cap is rejected without allocating (8192*8193 > 8192^2); a
+    // normal size still renders. (We avoid rendering at the 256 MB cap here so we
+    // don't pollute the process-RSS leak test that runs concurrently.)
+    assert!(
+        take(render(MINIMAL, 0.0, "{}", 8192, 8193)).is_none(),
+        "just over the cap must reject"
+    );
+    assert!(
+        take(render(MINIMAL, 0.0, "{}", 512, 512)).is_some(),
+        "normal size renders"
     );
 }

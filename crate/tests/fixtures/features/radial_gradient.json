@@ -1,0 +1,5 @@
+{ "version": 1, "size": { "width": 128, "height": 96 },
+  "root": { "kind": "shape", "key": "r",
+    "geometry": { "kind": "rect", "x": 0, "y": 0, "width": 128, "height": 96 },
+    "fill": { "kind": "radialGradient", "cx": 64, "cy": 48, "r": 70,
+      "stops": [ { "at": 0, "color": "#FFEE88" }, { "at": 1, "color": "#221133" } ] } } }

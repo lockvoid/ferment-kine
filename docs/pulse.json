@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "size": { "width": 480, "height": 480 },
+  "inputs": [
+    { "key": "time",       "type": "time",  "default": 0 },
+    { "key": "background", "type": "color", "default": "#0E1017" },
+    { "key": "accent",     "type": "color", "default": "#22D3EE" }
+  ],
+  "colors": [
+    { "key": "bg",       "value": { "input": "background" } },
+    { "key": "seed",     "value": { "input": "accent" } },
+    { "key": "plateTop", "value": { "fn": "mix", "a": "bg", "b": "seed", "t": 0.10 } },
+    { "key": "plateBot", "value": { "fn": "mix", "a": "bg", "b": "#000000", "t": 0.45 } },
+    { "key": "core1",    "value": { "fn": "mix", "a": "seed", "b": "#FFFFFF", "t": 0.50 } },
+    { "key": "ringC",    "value": { "fn": "alpha", "of": "seed", "amount": 0.85 } },
+    { "key": "hair",     "value": { "fn": "alpha", "of": "seed", "amount": 0.22 } },
+    { "key": "dotC",     "value": { "fn": "mix", "a": "seed", "b": "#FFFFFF", "t": 0.25 } }
+  ],
+  "root": { "kind": "group", "key": "mark", "children": [
+    { "kind": "shape", "key": "plate",
+      "geometry": { "kind": "rect", "x": 0, "y": 0, "width": 480, "height": 480 },
+      "fill": { "kind": "radialGradient", "cx": 240, "cy": 240, "r": 340,
+        "stops": [ { "at": 0, "color": { "color": "plateTop" } }, { "at": 1, "color": { "color": "plateBot" } } ] } },
+
+    { "kind": "shape", "key": "outer",
+      "geometry": { "kind": "ellipse", "cx": 240, "cy": 240, "rx": 150, "ry": 150 },
+      "stroke": { "color": { "color": "hair" }, "width": 2 } },
+    { "kind": "shape", "key": "ring",
+      "geometry": { "kind": "ellipse", "cx": 240, "cy": 240, "rx": 98, "ry": 98 },
+      "stroke": { "color": { "color": "ringC" }, "width": 6, "cap": "round" } },
+
+    { "kind": "group", "key": "orbit", "transform": { "anchorX": 0.5, "anchorY": 0.5 }, "children": [
+      { "kind": "shape", "key": "d0",
+        "geometry": { "kind": "ellipse", "cx": 240, "cy": 96,  "rx": 15, "ry": 15 },
+        "fill": { "kind": "solid", "color": { "color": "dotC" } } },
+      { "kind": "shape", "key": "d1",
+        "geometry": { "kind": "ellipse", "cx": 384, "cy": 240, "rx": 15, "ry": 15 },
+        "fill": { "kind": "solid", "color": { "color": "dotC" } } },
+      { "kind": "shape", "key": "d2",
+        "geometry": { "kind": "ellipse", "cx": 240, "cy": 384, "rx": 15, "ry": 15 },
+        "fill": { "kind": "solid", "color": { "color": "dotC" } } },
+      { "kind": "shape", "key": "d3",
+        "geometry": { "kind": "ellipse", "cx": 96,  "cy": 240, "rx": 15, "ry": 15 },
+        "fill": { "kind": "solid", "color": { "color": "dotC" } } }
+    ] },
+
+    { "kind": "group", "key": "core", "transform": { "anchorX": 0.5, "anchorY": 0.5 }, "children": [
+      { "kind": "shape", "key": "bead",
+        "geometry": { "kind": "ellipse", "cx": 240, "cy": 240, "rx": 60, "ry": 60 },
+        "fill": { "kind": "radialGradient", "cx": 218, "cy": 218, "r": 96,
+          "stops": [ { "at": 0, "color": { "color": "core1" } }, { "at": 1, "color": { "color": "seed" } } ] } }
+    ] }
+  ] },
+  "animators": [
+    { "target": "orbit", "property": "rotate", "driver": "time", "period": 4,
+      "from": 0, "to": 360, "ease": "linear" },
+    { "target": "core", "property": "scale", "driver": "time", "period": 2,
+      "keyframes": [
+        { "at": 0,    "value": 0.72 },
+        { "at": 0.28, "value": 1.14, "ease": { "spring": { "bounce": 0.55, "duration": 0.5 } } },
+        { "at": 0.60, "value": 1.0,  "ease": "easeOut" },
+        { "at": 1.0,  "value": 0.72, "ease": "easeIn" }
+      ] }
+  ]
+}

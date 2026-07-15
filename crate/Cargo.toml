@@ -2,6 +2,7 @@
 name = "kine"
 version = "0.1.0"
 edition = "2021"
+authors = ["LockVoid Labs ~●~"]
 license = "MIT OR Apache-2.0"
 # Not published to crates.io while pre-1.0; consumers vendor or pin a git rev.
 publish = false

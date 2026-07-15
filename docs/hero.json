@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "size": { "width": 800, "height": 260 },
+  "inputs": [
+    { "key": "time", "type": "time", "default": 0 },
+    { "key": "progress", "type": "unit", "default": 1 },
+    { "key": "activations", "type": "unitArray", "default": [1, 1] },
+    { "key": "foreground", "type": "color", "default": "#F4F4FB" },
+    { "key": "background", "type": "color", "default": "#14161F" },
+    { "key": "accent", "type": "color", "default": "#7C5CFF" }
+  ],
+  "colors": [
+    { "key": "textFill", "value": { "input": "foreground" } },
+    { "key": "active", "value": { "input": "accent" } },
+    { "key": "pending", "value": { "fn": "mix", "a": "textFill", "b": { "input": "background" }, "t": 0.62 } },
+    { "key": "plateTop", "value": { "input": "background" } },
+    { "key": "plateBot", "value": { "fn": "mix", "a": "plateTop", "b": "active", "t": 0.35 } },
+    { "key": "border", "value": { "fn": "contrast", "of": "plateTop" } },
+    { "key": "pillC", "value": { "fn": "alpha", "of": "active", "amount": 0.28 } }
+  ],
+  "root": { "kind": "group", "key": "card", "children": [
+    { "kind": "shape", "key": "plate",
+      "geometry": { "kind": "roundedRect", "x": 12, "y": 12, "width": 776, "height": 236, "radius": 28 },
+      "fill": { "kind": "linearGradient", "x1": 0, "y1": 0, "x2": 0, "y2": 260,
+        "stops": [ { "at": 0, "color": { "color": "plateTop" } }, { "at": 1, "color": { "color": "plateBot" } } ] },
+      "stroke": { "color": { "color": "border" }, "width": 2 } },
+    { "kind": "text", "key": "line", "role": "text", "content": "MOTION AS DATA",
+      "frame": { "x": 40, "y": 78, "width": 720, "height": 104 },
+      "style": { "fontFamily": "Bebas Neue", "size": 96, "align": "center", "valign": "center",
+        "fill": { "color": "pending" }, "activeFill": { "color": "active" },
+        "pill": { "color": { "color": "pillC" }, "radius": 14, "paddingX": 10, "paddingY": 4 } } }
+  ] },
+  "animators": [
+    { "target": "line.glyphs", "property": "translateY",
+      "weight": { "stagger": { "driver": "time", "period": 2.4, "total": 0.7, "from": "start", "ease": "linear" } },
+      "keyframes": [ { "at": 0, "value": 0 }, { "at": 0.5, "value": -10, "ease": "easeInOut" }, { "at": 1, "value": 0, "ease": "easeInOut" } ] },
+    { "target": "line.glyphs", "property": "color",
+      "weight": { "stagger": { "driver": "progress", "total": 0.85, "from": "start" } }, "ease": "easeOut" },
+    { "target": "line.words", "property": "scale",
+      "weight": { "input": "activations" }, "from": 1.0, "to": 1.1,
+      "ease": { "spring": { "bounce": 0.45, "duration": 0.55 } }, "composite": "multiply" }
+  ]
+}

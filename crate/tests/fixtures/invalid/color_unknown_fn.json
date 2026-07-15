@@ -1,0 +1,5 @@
+{ "version": 1, "size": { "width": 64, "height": 64 },
+  "colors": [ { "key": "a", "value": { "fn": "lighten", "of": "#808080", "amount": 0.2 } } ],
+  "root": { "kind": "shape", "key": "dot",
+    "geometry": { "kind": "ellipse", "cx": 32, "cy": 32, "rx": 20, "ry": 20 },
+    "fill": { "kind": "solid", "color": { "color": "a" } } } }

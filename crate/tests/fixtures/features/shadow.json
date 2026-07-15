@@ -1,0 +1,9 @@
+{ "version": 1, "size": { "width": 200, "height": 96 },
+  "root": { "kind": "group", "key": "g", "children": [
+    { "kind": "shape", "key": "bg",
+      "geometry": { "kind": "rect", "x": 0, "y": 0, "width": 200, "height": 96 },
+      "fill": { "kind": "solid", "color": "#20242E" } },
+    { "kind": "text", "key": "t", "content": "GLOW",
+      "frame": { "x": 8, "y": 16, "width": 184, "height": 64 },
+      "style": { "fontFamily": "Bebas Neue", "size": 52, "align": "center", "valign": "center",
+        "fill": "#FFFFFF", "shadow": { "color": "#00000099", "offsetX": 0, "offsetY": 4, "blur": 6 } } } ] } }

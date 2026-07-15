@@ -58,6 +58,8 @@ pub struct Document {
     #[serde(default)]
     pub inputs: Vec<Input>,
     #[serde(default)]
+    pub colors: Vec<ColorEntry>,
+    #[serde(default)]
     pub assets: Vec<serde_json::Value>,
     pub root: Node,
     #[serde(default)]
@@ -173,6 +175,183 @@ pub struct EnumInput {
 pub struct FontFamilyInput {
     pub key: String,
     pub default: String,
+}
+
+// --- colors (§3) -------------------------------------------------------------
+
+/// One entry in the document's private color table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ColorEntry {
+    pub key: String,
+    pub value: ColorExpr,
+    /// Binding to a declared color input; when supplied it replaces the value.
+    #[serde(default, rename = "override")]
+    pub override_input: Option<InputRef>,
+}
+
+/// A `{ "input": "key" }` binding object (color override / fn input arg).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputRef {
+    pub input: String,
+}
+
+/// A color-table entry's value: literal, input binding, or a derivation fn.
+#[derive(Debug, Clone)]
+pub enum ColorExpr {
+    Literal(String),
+    Input(String),
+    Alpha {
+        of: ColorRef,
+        amount: Bindable<f64>,
+    },
+    Contrast {
+        of: ColorRef,
+        candidates: Option<Vec<ColorRef>>,
+    },
+    Mix {
+        a: ColorRef,
+        b: ColorRef,
+        t: Bindable<f64>,
+    },
+}
+
+impl<'de> Deserialize<'de> for ColorExpr {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AlphaArgs {
+            of: ColorRef,
+            amount: Bindable<f64>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ContrastArgs {
+            of: ColorRef,
+            #[serde(default)]
+            candidates: Option<Vec<ColorRef>>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct MixArgs {
+            a: ColorRef,
+            b: ColorRef,
+            t: Bindable<f64>,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let serde_json::Value::String(s) = &value {
+            return Ok(ColorExpr::Literal(s.clone()));
+        }
+        let map = value.as_object().ok_or_else(|| {
+            D::Error::custom("expected a color literal, { input }, or a { fn } object")
+        })?;
+
+        if let Some(function) = map.get("fn") {
+            let name = function
+                .as_str()
+                .ok_or_else(|| D::Error::custom("color function `fn` must be a string"))?;
+            // Strip the tag so the argument structs stay strict (deny_unknown_fields).
+            let mut args = map.clone();
+            args.remove("fn");
+            let args = serde_json::Value::Object(args);
+            return match name {
+                "alpha" => {
+                    let a: AlphaArgs = serde_json::from_value(args).map_err(D::Error::custom)?;
+                    Ok(ColorExpr::Alpha {
+                        of: a.of,
+                        amount: a.amount,
+                    })
+                }
+                "contrast" => {
+                    let a: ContrastArgs = serde_json::from_value(args).map_err(D::Error::custom)?;
+                    Ok(ColorExpr::Contrast {
+                        of: a.of,
+                        candidates: a.candidates,
+                    })
+                }
+                "mix" => {
+                    let a: MixArgs = serde_json::from_value(args).map_err(D::Error::custom)?;
+                    Ok(ColorExpr::Mix {
+                        a: a.a,
+                        b: a.b,
+                        t: a.t,
+                    })
+                }
+                other => Err(D::Error::custom(format!(
+                    "unknown color function \"{other}\""
+                ))),
+            };
+        }
+        if map.contains_key("input") {
+            let r: InputRef = serde_json::from_value(value).map_err(D::Error::custom)?;
+            return Ok(ColorExpr::Input(r.input));
+        }
+        Err(D::Error::custom(
+            "expected a color literal, { input }, or a { fn } object",
+        ))
+    }
+}
+
+/// A color-function argument: literal `#…`, input binding, or the string key of
+/// an EARLIER table entry.
+#[derive(Debug, Clone)]
+pub enum ColorRef {
+    Literal(String),
+    Input(String),
+    Entry(String),
+}
+
+impl<'de> Deserialize<'de> for ColorRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Str(String),
+            Input(InputRef),
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Str(s) if s.starts_with('#') => ColorRef::Literal(s),
+            Raw::Str(s) => ColorRef::Entry(s),
+            Raw::Input(r) => ColorRef::Input(r.input),
+        })
+    }
+}
+
+/// A color-typed leaf: literal hex, input binding, or a `{ "color": key }`
+/// reference into the table (§3).
+#[derive(Debug, Clone)]
+pub enum ColorValue {
+    Literal(String),
+    Input(String),
+    Color(String),
+}
+
+impl<'de> Deserialize<'de> for ColorValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Str(String),
+            Obj(Obj),
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        enum Obj {
+            #[serde(rename = "input")]
+            Input(String),
+            #[serde(rename = "color")]
+            Color(String),
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Str(s) => ColorValue::Literal(s),
+            Raw::Obj(Obj::Input(k)) => ColorValue::Input(k),
+            Raw::Obj(Obj::Color(k)) => ColorValue::Color(k),
+        })
+    }
 }
 
 // --- bindings ----------------------------------------------------------------
@@ -333,7 +512,7 @@ pub enum Paint {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SolidPaint {
-    pub color: Bindable<String>,
+    pub color: ColorValue,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -359,13 +538,13 @@ pub struct RadialGradientPaint {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GradientStop {
     pub at: f64,
-    pub color: Bindable<String>,
+    pub color: ColorValue,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ShapeStroke {
-    pub color: Bindable<String>,
+    pub color: ColorValue,
     pub width: Bindable<f64>,
     #[serde(default)]
     pub cap: Option<LineCap>,
@@ -426,9 +605,9 @@ pub struct TextStyle {
     pub align: Option<Align>,
     #[serde(default)]
     pub valign: Option<VAlign>,
-    pub fill: Bindable<String>,
+    pub fill: ColorValue,
     #[serde(default)]
-    pub active_fill: Option<Bindable<String>>,
+    pub active_fill: Option<ColorValue>,
     #[serde(default)]
     pub stroke: Option<TextStroke>,
     #[serde(default)]
@@ -463,14 +642,14 @@ pub enum VAlign {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TextStroke {
-    pub color: Bindable<String>,
+    pub color: ColorValue,
     pub width: Bindable<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TextShadow {
-    pub color: Bindable<String>,
+    pub color: ColorValue,
     #[serde(default)]
     pub offset_x: Option<Bindable<f64>>,
     #[serde(default)]
@@ -482,7 +661,7 @@ pub struct TextShadow {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TextPill {
-    pub color: Bindable<String>,
+    pub color: ColorValue,
     #[serde(default)]
     pub radius: Option<Bindable<f64>>,
     #[serde(default)]
@@ -522,12 +701,35 @@ pub struct Animator {
     pub hue: Option<Hue>,
 }
 
-/// A number or a color string; typed against the property at validation.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+/// A number, a literal color, or a `{ "color": key }` table reference; typed
+/// against the property at validation.
+#[derive(Debug, Clone)]
 pub enum ValueLit {
     Number(f64),
     Color(String),
+    ColorRef(String),
+}
+
+impl<'de> Deserialize<'de> for ValueLit {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Number(f64),
+            Color(String),
+            Ref(ColorRefObj),
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ColorRefObj {
+            color: String,
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Number(n) => ValueLit::Number(n),
+            Raw::Color(s) => ValueLit::Color(s),
+            Raw::Ref(r) => ValueLit::ColorRef(r.color),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

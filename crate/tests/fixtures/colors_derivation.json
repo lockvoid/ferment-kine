@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "size": { "width": 240, "height": 120 },
+  "inputs": [
+    { "key": "foreground", "type": "color", "default": "#F2F2F7" },
+    { "key": "background", "type": "color", "default": "#101018" },
+    { "key": "accent", "type": "color", "default": "#3B82F6" }
+  ],
+  "colors": [
+    { "key": "textFill", "value": { "input": "foreground" } },
+    { "key": "active", "value": { "input": "accent" } },
+    { "key": "pillC", "value": { "fn": "alpha", "of": "active", "amount": 0.35 } },
+    { "key": "border", "value": { "fn": "contrast", "of": { "input": "background" } } },
+    { "key": "plate", "value": { "fn": "mix", "a": { "input": "background" }, "b": "active", "t": 0.2 } }
+  ],
+  "root": { "kind": "group", "key": "g", "children": [
+    { "kind": "shape", "key": "bg",
+      "geometry": { "kind": "roundedRect", "x": 8, "y": 8, "width": 224, "height": 104, "radius": 14 },
+      "fill": { "kind": "solid", "color": { "color": "plate" } },
+      "stroke": { "color": { "color": "border" }, "width": 2 } },
+    { "kind": "text", "key": "t", "content": "DERIVE",
+      "frame": { "x": 12, "y": 24, "width": 216, "height": 72 },
+      "style": { "fontFamily": "Bebas Neue", "size": 44, "align": "center", "valign": "center",
+        "fill": { "color": "textFill" }, "activeFill": { "color": "active" },
+        "pill": { "color": { "color": "pillC" }, "radius": 8, "paddingX": 6, "paddingY": 3 } } }
+  ] }
+}

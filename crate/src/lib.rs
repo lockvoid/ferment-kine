@@ -12,6 +12,7 @@ mod capi;
 mod error;
 mod eval;
 mod fonts;
+mod handle;
 mod render;
 mod schema;
 mod validate;

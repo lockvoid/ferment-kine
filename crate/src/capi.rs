@@ -8,8 +8,15 @@
 
 use std::ffi::{c_char, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Arc;
 
-use crate::{error, fonts, render};
+use crate::validate::Compiled;
+use crate::{error, fonts, handle, render};
+
+enum Encoding {
+    Png,
+    Rgba,
+}
 
 /// Owned byte buffer handed to the caller. `{NULL, 0}` signals failure — call
 /// `kine_last_error()`. Any non-null buffer must be released with
@@ -66,8 +73,10 @@ pub extern "C" fn kine_register_font(bytes: *const u8, len: usize) -> i32 {
 }
 
 /// Render a v1 motion document at time `t` with the given signals into PNG
-/// bytes. `t` is sugar for the document's `time` input; an explicit `time`
-/// signal wins. Parsing/validation is strict; signal supply is lenient.
+/// bytes (straight alpha). `t` is sugar for the document's `time` input; an
+/// explicit `time` signal wins. Parsing/validation is strict; signal supply is
+/// lenient. One-shot convenience — for repeated renders of one document, use a
+/// handle (`kine_document_create`).
 #[no_mangle]
 pub extern "C" fn kine_render_document(
     doc_json: *const c_char,
@@ -77,17 +86,24 @@ pub extern "C" fn kine_render_document(
     height: u32,
 ) -> kine_buf {
     guard(move || {
-        let doc_text = cstr(doc_json, "document")?;
-        let signals = if signals_json.is_null() {
-            serde_json::Value::Null
-        } else {
-            parse_json(cstr(signals_json, "signals")?, "signals")?
-        };
+        let compiled = compile(cstr(doc_json, "document")?)?;
+        render_scene(&compiled, t, signals_json, width, height, Encoding::Png)
+    })
+}
 
-        let doc = crate::schema::parse(doc_text).map_err(|e| e.to_string())?;
-        let compiled = crate::validate::validate(doc).map_err(|e| e.to_string())?;
-        let scene = crate::eval::evaluate(&compiled.doc, &signals, t).map_err(|e| e.to_string())?;
-        render::render(&scene, width, height)
+/// Like `kine_render_document`, but returns raw RGBA8 (premultiplied, sRGB,
+/// row-major, stride = width*4) for texture-upload clients.
+#[no_mangle]
+pub extern "C" fn kine_render_document_rgba(
+    doc_json: *const c_char,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+) -> kine_buf {
+    guard(move || {
+        let compiled = compile(cstr(doc_json, "document")?)?;
+        render_scene(&compiled, t, signals_json, width, height, Encoding::Rgba)
     })
 }
 
@@ -97,11 +113,76 @@ pub extern "C" fn kine_render_document(
 #[no_mangle]
 pub extern "C" fn kine_probe(doc_json: *const c_char) -> kine_buf {
     guard(move || {
-        let doc_text = cstr(doc_json, "document")?;
-        let doc = crate::schema::parse(doc_text).map_err(|e| e.to_string())?;
-        let compiled = crate::validate::validate(doc).map_err(|e| e.to_string())?;
+        let compiled = compile(cstr(doc_json, "document")?)?;
         Ok(interface_json(&compiled).to_string().into_bytes())
     })
+}
+
+// --- handles ----------------------------------------------------------------
+
+/// Parse + validate a document and keep it as a reusable handle (parsing the
+/// same document every frame is waste). Returns the handle (> 0), or 0 on a
+/// parse/validation error (see `kine_last_error`). Free it with
+/// `kine_document_free`.
+#[no_mangle]
+pub extern "C" fn kine_document_create(doc_json: *const c_char) -> i64 {
+    error::clear();
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<i64, String> {
+        let compiled = compile(cstr(doc_json, "document")?)?;
+        Ok(handle::insert(compiled))
+    }));
+    match result {
+        Ok(Ok(id)) => id,
+        Ok(Err(message)) => {
+            error::set(message);
+            0
+        }
+        Err(_) => {
+            error::set("panic in kine_document_create");
+            0
+        }
+    }
+}
+
+/// Describe a handle's interface (same payload as `kine_probe`).
+#[no_mangle]
+pub extern "C" fn kine_document_probe(handle: i64) -> kine_buf {
+    guard(move || {
+        let compiled = document(handle)?;
+        Ok(interface_json(&compiled).to_string().into_bytes())
+    })
+}
+
+/// Render a handle at time `t` with the given signals into raw RGBA8
+/// (premultiplied, sRGB, row-major, stride = width*4). Safe to call
+/// concurrently from any thread on the same or different handles.
+#[no_mangle]
+pub extern "C" fn kine_document_render_rgba(
+    handle: i64,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+) -> kine_buf {
+    guard(move || {
+        let compiled = document(handle)?;
+        render_scene(&compiled, t, signals_json, width, height, Encoding::Rgba)
+    })
+}
+
+/// Free a document handle. Idempotent; a use-after-free reports an error on the
+/// next call, never crashes.
+#[no_mangle]
+pub extern "C" fn kine_document_free(handle: i64) {
+    let _ = catch_unwind(AssertUnwindSafe(|| handle::remove(handle)));
+}
+
+/// Crate + schema version, e.g. "kine 0.1.0 (schema v1)". Static; never freed.
+#[no_mangle]
+pub extern "C" fn kine_version() -> *const c_char {
+    // NUL-terminated in the literal so it is a valid C string with no allocation.
+    const VERSION: &str = concat!("kine ", env!("CARGO_PKG_VERSION"), " (schema v1)\0");
+    VERSION.as_ptr() as *const c_char
 }
 
 /// The probe payload: declared inputs echoed with their type-specific fields.
@@ -181,6 +262,38 @@ fn guard(body: impl FnOnce() -> Result<Vec<u8>, String>) -> kine_buf {
             error::set("panic in kine");
             kine_buf::null()
         }
+    }
+}
+
+/// Parse + validate a document (shared by the one-shot and handle paths).
+fn compile(doc_text: &str) -> Result<Compiled, String> {
+    let doc = crate::schema::parse(doc_text).map_err(|e| e.to_string())?;
+    crate::validate::validate(doc).map_err(|e| e.to_string())
+}
+
+fn document(handle: i64) -> Result<Arc<Compiled>, String> {
+    handle::get(handle).ok_or_else(|| "invalid or freed document handle".to_string())
+}
+
+/// Evaluate + render a compiled document — the single render implementation
+/// behind every one-shot and handle entry point.
+fn render_scene(
+    compiled: &Compiled,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+    encoding: Encoding,
+) -> Result<Vec<u8>, String> {
+    let signals = if signals_json.is_null() {
+        serde_json::Value::Null
+    } else {
+        parse_json(cstr(signals_json, "signals")?, "signals")?
+    };
+    let scene = crate::eval::evaluate(&compiled.doc, &signals, t).map_err(|e| e.to_string())?;
+    match encoding {
+        Encoding::Png => render::render_png(&scene, width, height),
+        Encoding::Rgba => render::render_rgba(&scene, width, height),
     }
 }
 

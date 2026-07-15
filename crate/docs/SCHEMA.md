@@ -17,6 +17,7 @@ write time, never on device.
   "version": 1,
   "size": { "width": 1080, "height": 240 },
   "inputs": [],
+  "colors": [],
   "assets": [],
   "root": {},
   "animators": []
@@ -58,22 +59,96 @@ a document with no supplied signals renders its designed look.
 | `fontFamily` | string                             | resolved against registered fonts|
 
 Input keys: `[a-z][a-zA-Z0-9]*`, unique. Standard keys by convention (not
-schema-special): `time`, `inProgress`, `outProgress`, `text`, `activations`,
-`emphasis` — the engine and compiler wire these uniformly.
+schema-special): `time`, `inProgress`, `outProgress`, `focus`, `text`,
+`activations`, `emphasis` — the engine and compiler wire these uniformly.
+Standard SEED inputs (color-typed): `foreground`, `background`, `accent` —
+the published color interface. Hosts map them from user pickers and brand
+roles (`foreground ← brand.text`, `background ← brand.background`,
+`accent ← brand.accent`); documents consume them through the colors table
+(§3). A document declares only the seeds it uses; pickers render per probe.
 
 Signal supply at render is LENIENT: unsupplied inputs use defaults, unknown
 signal keys are ignored (the engine broadcasts a standard set without knowing
 each document's interface). Document-internal references are STRICT.
 
-## 3. Nodes
+## 3. Colors
+
+The document's private color table: named colors derived from seeds and
+each other, so the derivation (one accent → active/pill/emphasis, contrast
+strokes, translucent plates) is document truth executed identically on
+every platform — never host-side color math.
+
+```json
+"colors": [
+  { "key": "textFill", "value": { "input": "foreground" } },
+  { "key": "active",   "value": { "input": "accent" } },
+  { "key": "pill",     "value": { "fn": "alpha", "of": "active", "amount": 0.3 } },
+  { "key": "strokeC",  "value": { "fn": "contrast", "of": "textFill" },
+    "override": { "input": "strokeColor" } },
+  { "key": "plateC",   "value": { "fn": "mix", "a": "#000000", "b": "background", "t": 0.85 } }
+]
+```
+
+- Entry `key`: `[a-z][a-zA-Z0-9]*`, unique across the table.
+- `value` grammar — one of:
+  - literal `#RRGGBB` / `#RRGGBBAA`
+  - `{ "input": "<color input key>" }`
+  - `{ "fn": "alpha", "of": ref, "amount": 0..1 }` — replaces alpha
+  - `{ "fn": "contrast", "of": ref }` — `#000000` or `#FFFFFF`, whichever
+    has the greater Oklab lightness distance from `of`
+  - `{ "fn": "mix", "a": ref, "b": ref, "t": 0..1 }` — Oklab,
+    premultiplied-alpha interpolation
+- A `ref` argument is a literal (starts with `#`), a color-input binding
+  object, or the string key of an EARLIER table entry — entries may only
+  reference entries declared above them (acyclic by construction).
+- `override` — optional binding to a declared color input; when that
+  signal is supplied at render it replaces the computed value entirely.
+  This is the explicit-surface channel: host style overrides win over
+  derivation.
+- The table is PRIVATE: probe does not emit it. The published interface
+  stays the declared inputs (seeds + any override inputs).
+- Usage: wherever a color value is accepted (node paints, text style,
+  animator `from`/`to`), the form `{ "color": "<entry key>" }` references
+  a table entry, alongside the existing literal and `{ "input": … }` forms.
+- Variants (invert etc.) are NOT expressed in-document: a variant is a
+  compiler-side overlay replacing table entries — structural selection,
+  recompile, engine stays conditional-free.
+
+### Function reference
+
+All color math runs in Oklab with premultiplied alpha, evaluated once per
+input set (§6 step 4). Functions are pure; results are ordinary colors.
+
+`{ "fn": "alpha", "of": ref, "amount": a }`
+- `a` ∈ [0,1]. Replaces the alpha channel: rgb unchanged, alpha = `a`.
+  Absolute, not multiplicative — authors state final translucency; on
+  nested alpha calls the outer one wins.
+
+`{ "fn": "contrast", "of": ref, "candidates": [ref, …]? }`
+- `candidates` = 2+ refs, default `["#000000", "#FFFFFF"]`. Returns the
+  candidate with the greatest |ΔL| (Oklab lightness distance) from `of`;
+  ties resolve to the earlier candidate. The auto-stroke / glyph-on-pill
+  derivation; with custom candidates it clamps any input color onto a
+  designed pole set.
+
+`{ "fn": "mix", "a": ref, "b": ref, "t": t }`
+- `t` ∈ [0,1]. Oklab premultiplied interpolation from `a` (t=0) to `b`
+  (t=1) — the same lerp animators use (§5). lighten/darken are
+  deliberately NOT functions: mix with white/black.
+
+Reserved (§8): `nearest` (min-ΔE snap to candidates — the quantize cousin
+of contrast), hue rotation, lighten/darken sugar.
+
+## 4. Nodes
 
 Common: `kind`, `key` (doc-unique, `[a-zA-Z][a-zA-Z0-9_-]*`, immutable),
 optional `role` (doc-unique string; compile-time composition address — in/out
 animation fragments target roles, the compiler resolves them to keys).
 
 Any leaf value below may be a literal or an input binding
-`{ "input": "key" }` of matching type. `enum` inputs are declarable but not
-bindable in v1.
+`{ "input": "key" }` of matching type; color-typed values additionally
+accept a table reference `{ "color": "key" }` (§3). `enum` inputs are
+declarable but not bindable in v1.
 
 ### group
 
@@ -142,7 +217,7 @@ Layout-affecting values (`frame`, `size`, `align`, `lineHeight`,
 `letterSpacing`, `fontFamily`, `weight`, `content`) are NOT animatable —
 paint and transform only (continuous animation never triggers re-layout).
 
-## 4. Animators
+## 5. Animators
 
 Ordered list; evaluation order = document order; later animators compose on
 top of earlier ones.
@@ -247,14 +322,16 @@ Default space: **Oklab, premultiplied alpha**. Per-animator override:
 `"hue": "shorter" | "longer" | "increasing" | "decreasing"` (default
 shorter). Gamut-map at output, never clamp mid-interpolation.
 
-## 5. Evaluation semantics
+## 6. Evaluation semantics
 
-1. Parse strictly; validate (§6).
+1. Parse strictly; validate (§7).
 2. Bake springs to points curves.
 3. Resolve input values: supplied signal or default; clamp per type.
    The C-ABI `t` argument is sugar for the `time` input; an explicit
    `time` signal wins.
-4. Resolve bindings in node properties.
+4. Resolve the colors table in declaration order (override input if
+   supplied, else the computed value); then resolve bindings and `{color}`
+   references in node properties.
 5. Apply animators in document order. For each: compute driver value
    (or per-unit weights), map through keyframes/ease, compose onto the
    current property value (`replace`/`add`/`multiply`), apply `amount`.
@@ -265,7 +342,7 @@ Determinism: identical document + identical signals ⇒ identical pixels,
 on every platform, forever. No randomness at render (stagger `random` is
 seeded and baked at load), no clocks, no environment reads.
 
-## 6. Validation (load-time hard errors)
+## 7. Validation (load-time hard errors)
 
 - unknown field / unknown enum value anywhere
 - `version` ≠ 1; `assets` ≠ []
@@ -280,14 +357,25 @@ seeded and baked at load), no clocks, no environment reads.
   gradient stops non-monotone, enum default not in `values`
 - text node without `content`; shape without fill and stroke
 - binding type mismatch (e.g. `string` input bound to a color property)
+- colors table: duplicate entry key; reference to an unknown or LATER
+  entry; unknown `fn`; fn argument out of domain; `override` binding a
+  non-color input; `{ "color": … }` reference to an unknown entry
 
 `probe` returns `{ "version", "size", "inputs": [...], "roles": [...] }`
 for a valid document, or the first validation error via the error channel.
 
-## 7. Reserved for later versions (designed slots, no code)
+## 8. Reserved for later versions (designed slots, no code)
 
-`assets` (embedded images), group `clip` shapes, filter/effect nodes
+`assets` — grammar decided, not yet built: entries
+`{ key, kind, mime, data (base64) | href (host-resolved reference) }`.
+Embedded base64 for small decorative bytes with HARD size budgets at
+validation (per-asset and per-document caps); `href` for anything larger,
+resolved by the host like fonts. Documents stay single-artifact JSON —
+no container format.
+
+Also reserved: group `clip` shapes, filter/effect nodes
 (engine post-pass territory), converter chains between driver and curve,
 `trigger`-type inputs, falloff-shape enums on stagger, grid staggers,
 typographic-space per-unit `size`/`weight` animation, nested/component
-documents, path morphing, dash patterns.
+documents, path morphing, dash patterns, additional color functions
+(lighten/darken sugar, hue rotation).

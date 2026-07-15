@@ -22,12 +22,38 @@ use crate::fonts;
 use crate::schema::{Align, LineCap, LineJoin, VAlign};
 use crate::validate::UnitLevel;
 
-pub fn render(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
+/// Render to a PNG blob (RGBA8, straight/un-premultiplied alpha per PNG).
+pub fn render_png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    render_pixmap(scene, width, height)?
+        .into_png()
+        .map_err(|e| format!("PNG encoding failed: {e}"))
+}
+
+/// Render to raw RGBA8 bytes: premultiplied alpha, sRGB, row-major, stride =
+/// width*4, len = width*height*4. This is what texture-upload clients want (no
+/// PNG round-trip). Note: premultiplied, unlike `render_png` (straight alpha).
+pub fn render_rgba(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    Ok(render_pixmap(scene, width, height)?
+        .data_as_u8_slice()
+        .to_vec())
+}
+
+fn render_pixmap(scene: &Scene, width: u32, height: u32) -> Result<Pixmap, String> {
+    // 8192x8192 = 256 MB of RGBA — generous for real exports (covers 8K), and a
+    // hard ceiling so a valid-per-dimension but enormous request (e.g. 65535x65535
+    // ≈ 17 GB) is rejected rather than OOM-killing the process.
+    const MAX_PIXELS: u64 = 8192 * 8192;
+
     if width == 0 || height == 0 {
         return Err("render size must be non-zero".to_string());
     }
     if width > u16::MAX as u32 || height > u16::MAX as u32 {
         return Err(format!("render size exceeds {}", u16::MAX));
+    }
+    if width as u64 * height as u64 > MAX_PIXELS {
+        return Err(format!(
+            "render area {width}x{height} exceeds {MAX_PIXELS} pixels"
+        ));
     }
 
     // Single-threaded: the multi-threaded dispatcher doesn't support filter
@@ -46,9 +72,7 @@ pub fn render(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String>
     let mut pixmap = Pixmap::new(width as u16, height as u16);
     ctx.flush();
     ctx.render_to_pixmap(&mut resources, &mut pixmap);
-    pixmap
-        .into_png()
-        .map_err(|e| format!("PNG encoding failed: {e}"))
+    Ok(pixmap)
 }
 
 fn draw_node(

@@ -26,3 +26,82 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+
+  xcframework:
+    # Build-only: the xcframework must assemble for all Apple slices. Swift host
+    # tests run against the macOS slice.
+    name: xcframework + swift test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: ./scripts/build-xcframework.sh
+      - run: swift test
+        working-directory: swift
+
+  deny:
+    name: cargo-deny (licenses + advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crate/Cargo.toml
+
+  gem:
+    name: gem install (extconf builds the crate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - run: rustup show
+        working-directory: crate
+      # Proves the extconf path outside any host app: build the extension, run tests.
+      - run: ruby ext/kine/extconf.rb
+        working-directory: ruby
+      - run: ruby -Ilib test/kine_test.rb
+        working-directory: ruby
+
+  readme-assets:
+    name: README still is fresh
+    # macOS (arm64), where the committed still was rendered — byte-exact there.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - run: rustup show
+        working-directory: crate
+      - run: ruby ext/kine/extconf.rb
+        working-directory: ruby
+      # Re-render (ffmpeg optional; only the deterministic still is byte-compared,
+      # since the animated WebP varies by ffmpeg build) and confirm it matches the
+      # committed asset — the README demo is a golden and can't silently lie.
+      - run: ruby scripts/render-readme-assets.rb
+      - run: git diff --exit-code -- docs/assets/social.png docs/assets/palette.png docs/assets/pulse.png
+
+  cross-arch-goldens:
+    # Informational, not a gate: regenerate goldens on x86 and report whether
+    # they diverge bitwise from the committed arm64 goldens. Records the
+    # cross-arch determinism verdict; same-arch stays byte-exact regardless.
+    name: cross-arch golden diff (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: crate
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: KINE_REGEN_GOLDENS=1 cargo test --locked golden_renders feature_goldens
+      - name: Diff regenerated goldens vs committed (arm64)
+        run: |
+          if git diff --quiet -- tests/goldens; then
+            echo "VERDICT: x86 goldens are byte-identical to arm64."
+          else
+            echo "VERDICT: x86 goldens DIVERGE from arm64 — cross-arch parity is perceptual, not bitwise."
+            git diff --stat -- tests/goldens
+          fi

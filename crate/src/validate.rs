@@ -55,6 +55,7 @@ pub fn validate(mut doc: Document) -> Result<Compiled, SchemaError> {
     }
 
     let inputs = check_inputs(&doc.inputs)?;
+    let colors = check_colors(&doc.colors, &inputs)?;
 
     let mut nodes: HashMap<String, NodeKind> = HashMap::new();
     let mut node_meta: HashMap<String, NodeInfo> = HashMap::new();
@@ -64,6 +65,7 @@ pub fn validate(mut doc: Document) -> Result<Compiled, SchemaError> {
         &doc.root,
         "root",
         &inputs,
+        &colors,
         &mut nodes,
         &mut node_meta,
         &mut roles,
@@ -72,7 +74,7 @@ pub fn validate(mut doc: Document) -> Result<Compiled, SchemaError> {
 
     for (index, animator) in doc.animators.iter().enumerate() {
         let path = format!("animators[{index}]");
-        check_animator(animator, &path, &inputs, &nodes, &node_meta)?;
+        check_animator(animator, &path, &inputs, &colors, &nodes, &node_meta)?;
     }
 
     bake_document_springs(&mut doc)?;
@@ -184,10 +186,12 @@ fn valid_node_key(key: &str) -> bool {
 
 // --- nodes --------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn check_node(
     node: &Node,
     path: &str,
     inputs: &HashMap<String, &'static str>,
+    colors: &HashSet<String>,
     nodes: &mut HashMap<String, NodeKind>,
     node_meta: &mut HashMap<String, NodeInfo>,
     roles: &mut Vec<String>,
@@ -240,6 +244,7 @@ fn check_node(
                     child,
                     &format!("{path}.children[{index}]"),
                     inputs,
+                    colors,
                     nodes,
                     node_meta,
                     roles,
@@ -254,11 +259,16 @@ fn check_node(
             check_geometry(&shape.geometry, &format!("{path}.geometry"), inputs)?;
             if let Some(fill) = &shape.fill {
                 info.has_solid_fill = matches!(fill, Paint::Solid(_));
-                check_paint(fill, &format!("{path}.fill"), inputs)?;
+                check_paint(fill, &format!("{path}.fill"), inputs, colors)?;
             }
             if let Some(stroke) = &shape.stroke {
                 info.has_stroke = true;
-                check_binding_color(&stroke.color, &format!("{path}.stroke.color"), inputs)?;
+                check_color_value(
+                    &stroke.color,
+                    &format!("{path}.stroke.color"),
+                    inputs,
+                    colors,
+                )?;
                 check_binding_number(&stroke.width, &format!("{path}.stroke.width"), inputs)?;
             }
         }
@@ -284,19 +294,29 @@ fn check_node(
                 &format!("{style_path}.lineHeight"),
                 inputs,
             )?;
-            check_binding_color(&style.fill, &format!("{style_path}.fill"), inputs)?;
+            check_color_value(&style.fill, &format!("{style_path}.fill"), inputs, colors)?;
             if let Some(active) = &style.active_fill {
                 info.has_active_fill = true;
-                check_binding_color(active, &format!("{style_path}.activeFill"), inputs)?;
+                check_color_value(active, &format!("{style_path}.activeFill"), inputs, colors)?;
             }
             if let Some(stroke) = &style.stroke {
                 info.has_stroke = true;
-                check_binding_color(&stroke.color, &format!("{style_path}.stroke.color"), inputs)?;
+                check_color_value(
+                    &stroke.color,
+                    &format!("{style_path}.stroke.color"),
+                    inputs,
+                    colors,
+                )?;
                 check_binding_number(&stroke.width, &format!("{style_path}.stroke.width"), inputs)?;
             }
             if let Some(shadow) = &style.shadow {
                 info.has_shadow = true;
-                check_binding_color(&shadow.color, &format!("{style_path}.shadow.color"), inputs)?;
+                check_color_value(
+                    &shadow.color,
+                    &format!("{style_path}.shadow.color"),
+                    inputs,
+                    colors,
+                )?;
                 check_opt_binding_number(
                     &shadow.offset_x,
                     &format!("{style_path}.shadow.offsetX"),
@@ -315,7 +335,12 @@ fn check_node(
             }
             if let Some(pill) = &style.pill {
                 info.has_pill = true;
-                check_binding_color(&pill.color, &format!("{style_path}.pill.color"), inputs)?;
+                check_color_value(
+                    &pill.color,
+                    &format!("{style_path}.pill.color"),
+                    inputs,
+                    colors,
+                )?;
                 check_opt_binding_number(
                     &pill.radius,
                     &format!("{style_path}.pill.radius"),
@@ -411,21 +436,22 @@ fn check_paint(
     paint: &Paint,
     path: &str,
     inputs: &HashMap<String, &'static str>,
+    colors: &HashSet<String>,
 ) -> Result<(), SchemaError> {
     match paint {
-        Paint::Solid(p) => check_binding_color(&p.color, &format!("{path}.color"), inputs),
+        Paint::Solid(p) => check_color_value(&p.color, &format!("{path}.color"), inputs, colors),
         Paint::LinearGradient(p) => {
             check_binding_number(&p.x1, &format!("{path}.x1"), inputs)?;
             check_binding_number(&p.y1, &format!("{path}.y1"), inputs)?;
             check_binding_number(&p.x2, &format!("{path}.x2"), inputs)?;
             check_binding_number(&p.y2, &format!("{path}.y2"), inputs)?;
-            check_stops(&p.stops, path, inputs)
+            check_stops(&p.stops, path, inputs, colors)
         }
         Paint::RadialGradient(p) => {
             check_binding_number(&p.cx, &format!("{path}.cx"), inputs)?;
             check_binding_number(&p.cy, &format!("{path}.cy"), inputs)?;
             check_binding_number(&p.r, &format!("{path}.r"), inputs)?;
-            check_stops(&p.stops, path, inputs)
+            check_stops(&p.stops, path, inputs, colors)
         }
     }
 }
@@ -434,6 +460,7 @@ fn check_stops(
     stops: &[GradientStop],
     path: &str,
     inputs: &HashMap<String, &'static str>,
+    colors: &HashSet<String>,
 ) -> Result<(), SchemaError> {
     if stops.len() < 2 {
         return Err(SchemaError::new(
@@ -451,7 +478,7 @@ fn check_stops(
             ));
         }
         previous = stop.at;
-        check_binding_color(&stop.color, &format!("{stop_path}.color"), inputs)?;
+        check_color_value(&stop.color, &format!("{stop_path}.color"), inputs, colors)?;
     }
     Ok(())
 }
@@ -509,21 +536,202 @@ fn check_opt_binding_number(
     }
 }
 
-fn check_binding_color(
-    binding: &Bindable<String>,
+/// A color-typed leaf: literal, color-input binding, or `{color}` table ref.
+fn check_color_value(
+    value: &ColorValue,
+    path: &str,
+    inputs: &HashMap<String, &'static str>,
+    colors: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    match value {
+        ColorValue::Literal(s) => parse_color(s)
+            .map(|_| ())
+            .ok_or_else(|| SchemaError::new(path, malformed_color(s))),
+        ColorValue::Input(key) => match inputs.get(key.as_str()) {
+            Some(&"color") => Ok(()),
+            Some(t) => Err(SchemaError::new(
+                path,
+                format!("binding type mismatch: input \"{key}\" is {t}, expected color"),
+            )),
+            None => Err(SchemaError::new(
+                path,
+                format!("binding references undeclared input \"{key}\""),
+            )),
+        },
+        ColorValue::Color(key) => {
+            if colors.contains(key) {
+                Ok(())
+            } else {
+                Err(SchemaError::new(
+                    path,
+                    format!("reference to unknown color entry \"{key}\""),
+                ))
+            }
+        }
+    }
+}
+
+// --- colors table (§3 / §7) --------------------------------------------------
+
+/// Validate the color table and return the set of declared entry keys (for
+/// `{color}` references elsewhere). Entries may only reference EARLIER entries,
+/// which makes the table acyclic by construction.
+fn check_colors(
+    entries: &[ColorEntry],
+    inputs: &HashMap<String, &'static str>,
+) -> Result<HashSet<String>, SchemaError> {
+    let mut earlier: HashSet<String> = HashSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let path = format!("colors[{index}]");
+        if !valid_input_key(&entry.key) {
+            return Err(SchemaError::new(
+                format!("{path}.key"),
+                format!("\"{}\" must match [a-z][a-zA-Z0-9]*", entry.key),
+            ));
+        }
+        if earlier.contains(&entry.key) {
+            return Err(SchemaError::new(
+                format!("{path}.key"),
+                format!("duplicate color entry key \"{}\"", entry.key),
+            ));
+        }
+        check_color_expr(&entry.value, &format!("{path}.value"), inputs, &earlier)?;
+        if let Some(over) = &entry.override_input {
+            match inputs.get(over.input.as_str()) {
+                Some(&"color") => {}
+                Some(t) => {
+                    return Err(SchemaError::new(
+                        format!("{path}.override"),
+                        format!(
+                            "override binds \"{}\" which is {t}, expected a color input",
+                            over.input
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(SchemaError::new(
+                        format!("{path}.override"),
+                        format!("override references undeclared input \"{}\"", over.input),
+                    ));
+                }
+            }
+        }
+        earlier.insert(entry.key.clone());
+    }
+    Ok(earlier)
+}
+
+fn check_color_expr(
+    expr: &ColorExpr,
+    path: &str,
+    inputs: &HashMap<String, &'static str>,
+    earlier: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    match expr {
+        ColorExpr::Literal(s) => parse_color(s)
+            .map(|_| ())
+            .ok_or_else(|| SchemaError::new(path, malformed_color(s))),
+        ColorExpr::Input(key) => check_color_input(key, path, inputs),
+        ColorExpr::Alpha { of, amount } => {
+            check_color_ref(of, &format!("{path}.of"), inputs, earlier)?;
+            check_unit_arg(amount, &format!("{path}.amount"), inputs)
+        }
+        ColorExpr::Contrast { of, candidates } => {
+            check_color_ref(of, &format!("{path}.of"), inputs, earlier)?;
+            if let Some(list) = candidates {
+                if list.len() < 2 {
+                    return Err(SchemaError::new(
+                        format!("{path}.candidates"),
+                        "contrast needs at least 2 candidates",
+                    ));
+                }
+                for (i, reference) in list.iter().enumerate() {
+                    check_color_ref(
+                        reference,
+                        &format!("{path}.candidates[{i}]"),
+                        inputs,
+                        earlier,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        ColorExpr::Mix { a, b, t } => {
+            check_color_ref(a, &format!("{path}.a"), inputs, earlier)?;
+            check_color_ref(b, &format!("{path}.b"), inputs, earlier)?;
+            check_unit_arg(t, &format!("{path}.t"), inputs)
+        }
+    }
+}
+
+fn check_color_ref(
+    reference: &ColorRef,
+    path: &str,
+    inputs: &HashMap<String, &'static str>,
+    earlier: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    match reference {
+        ColorRef::Literal(s) => parse_color(s)
+            .map(|_| ())
+            .ok_or_else(|| SchemaError::new(path, malformed_color(s))),
+        ColorRef::Input(key) => check_color_input(key, path, inputs),
+        ColorRef::Entry(key) => {
+            if earlier.contains(key) {
+                Ok(())
+            } else {
+                Err(SchemaError::new(
+                    path,
+                    format!("reference to unknown or later color entry \"{key}\""),
+                ))
+            }
+        }
+    }
+}
+
+fn check_color_input(
+    key: &str,
     path: &str,
     inputs: &HashMap<String, &'static str>,
 ) -> Result<(), SchemaError> {
-    let literal = match binding {
-        Bindable::Literal(s) => Some(s.clone()),
-        Bindable::Input(_) => None,
-    };
-    binding_check(binding, path, inputs, &["color"], || match literal {
-        Some(s) => parse_color(&s)
-            .map(|_| ())
-            .ok_or_else(|| SchemaError::new(path, malformed_color(&s))),
-        None => Ok(()),
-    })
+    match inputs.get(key) {
+        Some(&"color") => Ok(()),
+        Some(t) => Err(SchemaError::new(
+            path,
+            format!("input \"{key}\" is {t}, expected color"),
+        )),
+        None => Err(SchemaError::new(
+            path,
+            format!("references undeclared input \"{key}\""),
+        )),
+    }
+}
+
+/// A color-fn `amount`/`t`: literal ∈ [0,1] or a unit/number input binding.
+fn check_unit_arg(
+    binding: &Bindable<f64>,
+    path: &str,
+    inputs: &HashMap<String, &'static str>,
+) -> Result<(), SchemaError> {
+    match binding {
+        Bindable::Literal(v) => {
+            if (0.0..=1.0).contains(v) {
+                Ok(())
+            } else {
+                Err(SchemaError::new(path, "must be within [0, 1]"))
+            }
+        }
+        Bindable::Input(key) => match inputs.get(key.as_str()) {
+            Some(&"unit") | Some(&"number") => Ok(()),
+            Some(t) => Err(SchemaError::new(
+                path,
+                format!("input \"{key}\" is {t}, expected unit or number"),
+            )),
+            None => Err(SchemaError::new(
+                path,
+                format!("references undeclared input \"{key}\""),
+            )),
+        },
+    }
 }
 
 fn check_binding_string(
@@ -588,6 +796,7 @@ fn check_animator(
     animator: &Animator,
     path: &str,
     inputs: &HashMap<String, &'static str>,
+    colors: &HashSet<String>,
     nodes: &HashMap<String, NodeKind>,
     node_meta: &HashMap<String, NodeInfo>,
 ) -> Result<(), SchemaError> {
@@ -740,7 +949,7 @@ fn check_animator(
         }
     }
 
-    check_value_mapping(animator, path, inputs, level, info)?;
+    check_value_mapping(animator, path, inputs, colors, level, info)?;
 
     if let Some(amount) = &animator.amount {
         binding_check(amount, &format!("{path}.amount"), inputs, &["unit"], || {
@@ -819,6 +1028,7 @@ fn check_value_mapping(
     animator: &Animator,
     path: &str,
     inputs: &HashMap<String, &'static str>,
+    colors: &HashSet<String>,
     level: Option<UnitLevel>,
     info: &NodeInfo,
 ) -> Result<(), SchemaError> {
@@ -843,6 +1053,20 @@ fn check_value_mapping(
                     )),
                 }
             }
+            Bindable::Literal(ValueLit::ColorRef(key)) if property_type == PropType::Color => {
+                if colors.contains(key) {
+                    Ok(())
+                } else {
+                    Err(SchemaError::new(
+                        value_path,
+                        format!("reference to unknown color entry \"{key}\""),
+                    ))
+                }
+            }
+            Bindable::Literal(ValueLit::ColorRef(_)) => Err(SchemaError::new(
+                value_path,
+                "expected a number value for a number property",
+            )),
             Bindable::Literal(ValueLit::Number(_)) if property_type == PropType::Number => Ok(()),
             Bindable::Literal(ValueLit::Color(s)) if property_type == PropType::Color => {
                 parse_color(s)

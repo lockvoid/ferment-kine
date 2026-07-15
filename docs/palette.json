@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "size": { "width": 900, "height": 248 },
+  "inputs": [
+    { "key": "background", "type": "color", "default": "#14161F" },
+    { "key": "accent",     "type": "color", "default": "#FF6A3D" }
+  ],
+  "colors": [
+    { "key": "bg",       "value": { "input": "background" } },
+    { "key": "seed",     "value": { "input": "accent" } },
+    { "key": "plateTop", "value": { "fn": "mix", "a": "bg", "b": "seed", "t": 0.10 } },
+    { "key": "plateBot", "value": { "fn": "mix", "a": "bg", "b": "#000000", "t": 0.35 } },
+    { "key": "ink",      "value": { "fn": "contrast", "of": "bg" } },
+    { "key": "hair",     "value": { "fn": "alpha", "of": "ink", "amount": 0.14 } },
+    { "key": "pale2",    "value": { "fn": "mix", "a": "seed", "b": "#FFFFFF", "t": 0.62 } },
+    { "key": "pale1",    "value": { "fn": "mix", "a": "seed", "b": "#FFFFFF", "t": 0.32 } },
+    { "key": "deep1",    "value": { "fn": "mix", "a": "seed", "b": "bg", "t": 0.32 } },
+    { "key": "deep2",    "value": { "fn": "mix", "a": "seed", "b": "bg", "t": 0.56 } },
+    { "key": "deep3",    "value": { "fn": "mix", "a": "seed", "b": "bg", "t": 0.78 } },
+    { "key": "ghost",    "value": { "fn": "alpha", "of": "seed", "amount": 0.30 } },
+    { "key": "onSeed",   "value": { "fn": "contrast", "of": "seed" } }
+  ],
+  "root": { "kind": "group", "key": "card", "children": [
+    { "kind": "shape", "key": "plate",
+      "geometry": { "kind": "roundedRect", "x": 8, "y": 8, "width": 884, "height": 232, "radius": 28 },
+      "fill": { "kind": "linearGradient", "x1": 0, "y1": 0, "x2": 0, "y2": 248,
+        "stops": [ { "at": 0, "color": { "color": "plateTop" } }, { "at": 1, "color": { "color": "plateBot" } } ] } },
+
+    { "kind": "text", "key": "title", "content": "PALETTE FROM ONE SEED",
+      "frame": { "x": 40, "y": 24, "width": 820, "height": 50 },
+      "style": { "fontFamily": "Bebas Neue", "size": 42, "align": "left", "valign": "center",
+        "letterSpacing": 2, "fill": { "color": "ink" } } },
+
+    { "kind": "shape", "key": "c0",
+      "geometry": { "kind": "roundedRect", "x": 40,  "y": 100, "width": 104, "height": 116, "radius": 18 },
+      "fill": { "kind": "solid", "color": { "color": "pale2" } },
+      "stroke": { "color": { "color": "hair" }, "width": 1 } },
+    { "kind": "shape", "key": "c1",
+      "geometry": { "kind": "roundedRect", "x": 159, "y": 100, "width": 104, "height": 116, "radius": 18 },
+      "fill": { "kind": "solid", "color": { "color": "pale1" } },
+      "stroke": { "color": { "color": "hair" }, "width": 1 } },
+    { "kind": "shape", "key": "c2",
+      "geometry": { "kind": "roundedRect", "x": 278, "y": 100, "width": 104, "height": 116, "radius": 18 },
+      "fill": { "kind": "solid", "color": { "color": "seed" } },
+      "stroke": { "color": { "color": "hair" }, "width": 1 } },
+    { "kind": "shape", "key": "c3",
+      "geometry": { "kind": "roundedRect", "x": 397, "y": 100, "width": 104, "height": 116, "radius": 18 },
+      "fill": { "kind": "solid", "color": { "color": "deep1" } },
+      "stroke": { "color": { "color": "hair" }, "width": 1 } },
+    { "kind": "shape", "key": "c4",
+      "geometry": { "kind": "roundedRect", "x": 516, "y": 100, "width": 104, "height": 116, "radius": 18 },
+      "fill": { "kind": "solid", "color": { "color": "deep2" } },
+      "stroke": { "color": { "color": "hair" }, "width": 1 } },
+    { "kind": "shape", "key": "c5",
+      "geometry": { "kind": "roundedRect", "x": 635, "y": 100, "width": 104, "height": 116, "radius": 18 },
+      "fill": { "kind": "solid", "color": { "color": "deep3" } },
+      "stroke": { "color": { "color": "hair" }, "width": 1 } },
+    { "kind": "shape", "key": "c6",
+      "geometry": { "kind": "roundedRect", "x": 754, "y": 100, "width": 104, "height": 116, "radius": 18 },
+      "fill": { "kind": "solid", "color": { "color": "ghost" } },
+      "stroke": { "color": { "color": "hair" }, "width": 1 } },
+
+    { "kind": "text", "key": "seedLabel", "content": "SEED",
+      "frame": { "x": 278, "y": 136, "width": 104, "height": 44 },
+      "style": { "fontFamily": "Bebas Neue", "size": 30, "align": "center", "valign": "center",
+        "fill": { "color": "onSeed" } } }
+  ] }
+}
