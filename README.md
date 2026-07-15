@@ -76,7 +76,7 @@ derivation *is* the document. Swap the `accent` seed and every chip re-derives:
 chip, and `contrast` choosing legible ink on the seed itself — identically on
 every platform. ([`docs/palette.json`](docs/palette.json))
 
-<img src="docs/assets/palette.png" width="900" alt="kine palette — one seed derived into a full ramp">
+<img src="docs/assets/palette.png" width="400" alt="kine palette — one seed derived into a full ramp">
 
 ```jsonc
 "colors": [
