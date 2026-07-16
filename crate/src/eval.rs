@@ -5,14 +5,17 @@
 //! the vello_cpu re-export so type identity with the renderer is guaranteed.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use color::{AlphaColor, HueDirection, Oklab, Oklch, Srgb};
 use vello_cpu::kurbo::{Affine, BezPath, Point, Rect, Shape as KurboShape};
+use vello_cpu::Pixmap;
 
+use crate::assets::DecodedAssets;
 use crate::schema::SchemaError;
 use crate::schema::{
-    self, Align, Bindable, ColorExpr, ColorRef, ColorValue, Composite, Document, Ease, Geometry,
-    Hue, Input, NamedEase, Node, Paint, Slant, StaggerFrom, VAlign, ValueLit, Weight,
+    self, Align, Bindable, ColorExpr, ColorRef, ColorValue, Composite, Document, Ease, Fit,
+    Geometry, Hue, Input, NamedEase, Node, Paint, Slant, StaggerFrom, VAlign, ValueLit, Weight,
 };
 use crate::validate::{parse_color, parse_target, prop_type, PropType, UnitLevel};
 
@@ -29,7 +32,18 @@ pub struct Scene {
 pub enum RNode {
     Group(RGroup),
     Shape(RShape),
+    Image(RImage),
     Text(Box<RText>),
+}
+
+pub struct RImage {
+    pub transform: Affine,
+    pub opacity: f64,
+    pub frame: Rect,
+    pub fit: Fit,
+    pub corner_radius: f64,
+    /// The premultiplied frame sampled for this render (§4 time rule).
+    pub image: Arc<Pixmap>,
 }
 
 pub struct RGroup {
@@ -578,15 +592,22 @@ struct Ctx<'a> {
     doc: &'a Document,
     inputs: &'a HashMap<String, InputValue>,
     colors: &'a HashMap<String, Color>,
+    assets: &'a DecodedAssets,
 }
 
-pub fn evaluate(doc: &Document, signals: &serde_json::Value, t: f64) -> Result<Scene, SchemaError> {
+pub fn evaluate(
+    doc: &Document,
+    assets: &DecodedAssets,
+    signals: &serde_json::Value,
+    t: f64,
+) -> Result<Scene, SchemaError> {
     let inputs = resolve_inputs(doc, signals, t)?;
     let colors = resolve_colors(doc, &inputs, signals);
     let ctx = Ctx {
         doc,
         inputs: &inputs,
         colors: &colors,
+        assets,
     };
     let (root, _bounds) = resolve_node(&ctx, &doc.root)?;
     Ok(Scene {
@@ -860,6 +881,43 @@ fn resolve_node(ctx: &Ctx, node: &Node) -> Result<(RNode, Rect), SchemaError> {
                     stroke,
                 }),
                 affine.transform_rect_bbox(bounds),
+            ))
+        }
+        Node::Image(image) => {
+            let x = ctx.num(&image.frame.x);
+            let y = ctx.num(&image.frame.y);
+            let frame = Rect::new(
+                x,
+                y,
+                x + ctx.num(&image.frame.width),
+                y + ctx.num(&image.frame.height),
+            );
+            let decoded = ctx
+                .assets
+                .get(&image.asset)
+                .expect("validated asset reference");
+            // §4: animated assets show the frame at `time mod loopDuration`; the
+            // sampling clock is the standard `time` input (0 when unsupplied).
+            let time = match ctx.inputs.get("time") {
+                Some(InputValue::Time(t)) => *t,
+                _ => 0.0,
+            };
+            let sampled = decoded.sample(time).clone();
+
+            let mut state = identity_state();
+            state.opacity = image.opacity.as_ref().map_or(1.0, |b| ctx.num(b));
+            apply_node_animators(ctx, &image.key, &mut state)?;
+            let affine = build_affine(&state, frame.center());
+            Ok((
+                RNode::Image(RImage {
+                    transform: affine,
+                    opacity: state.opacity.clamp(0.0, 1.0),
+                    frame,
+                    fit: image.fit.unwrap_or(Fit::Cover),
+                    corner_radius: image.corner_radius.as_ref().map_or(0.0, |b| ctx.num(b)),
+                    image: sampled,
+                }),
+                affine.transform_rect_bbox(frame),
             ))
         }
         Node::Text(text) => {

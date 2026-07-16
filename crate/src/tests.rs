@@ -94,11 +94,6 @@ fn invalid_fixtures_report_pathed_errors() {
             "version: must be 1",
         ),
         (
-            "assets_nonempty",
-            include_str!("../tests/fixtures/invalid/assets_nonempty.json"),
-            "assets: must be []",
-        ),
-        (
             "dup_node_key",
             include_str!("../tests/fixtures/invalid/dup_node_key.json"),
             "duplicate node key \"dot\"",
@@ -1149,5 +1144,677 @@ fn render_area_is_capped_not_allocated() {
     assert!(
         take(render(MINIMAL, 0.0, "{}", 512, 512)).is_some(),
         "normal size renders"
+    );
+}
+
+// --- image assets (§4/§5) ---------------------------------------------------
+//
+// Fixtures are generated in-process by the `image` encoders (deterministic, no
+// checked-in binaries) and round-tripped back through kine's own decode path.
+
+use base64::Engine as _;
+use image::codecs::gif::{GifEncoder, Repeat};
+use image::codecs::png::PngEncoder;
+use image::{Delay, ExtendedColorType, Frame, ImageEncoder, Rgba, RgbaImage};
+
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn solid(w: u32, h: u32, rgba: [u8; 4]) -> RgbaImage {
+    RgbaImage::from_pixel(w, h, Rgba(rgba))
+}
+
+/// TL red, TR green, BL blue, BR white — an orientation-revealing test image.
+fn quadrants(size: u32) -> RgbaImage {
+    let half = size / 2;
+    let mut img = RgbaImage::new(size, size);
+    for y in 0..size {
+        for x in 0..size {
+            let c = match (x < half, y < half) {
+                (true, true) => [220, 20, 20, 255],
+                (false, true) => [20, 200, 20, 255],
+                (true, false) => [20, 20, 220, 255],
+                (false, false) => [240, 240, 240, 255],
+            };
+            img.put_pixel(x, y, Rgba(c));
+        }
+    }
+    img
+}
+
+fn png_b64(img: &RgbaImage) -> String {
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    b64(&bytes)
+}
+
+fn gif_b64(frames: &[RgbaImage], delay_ms: u32) -> String {
+    let mut bytes = Vec::new();
+    {
+        // Fastest quantization (speed 30) — deterministic, and keeps the large
+        // decoded-size fixture cheap to encode.
+        let mut enc = GifEncoder::new_with_speed(&mut bytes, 30);
+        enc.set_repeat(Repeat::Infinite).unwrap();
+        for f in frames {
+            let frame = Frame::from_parts(f.clone(), 0, 0, Delay::from_numer_denom_ms(delay_ms, 1));
+            enc.encode_frame(frame).unwrap();
+        }
+    }
+    b64(&bytes)
+}
+
+fn image_doc(w: u32, h: u32, mime: &str, data: &str, node: &str) -> String {
+    format!(
+        r#"{{"version":1,"size":{{"width":{w},"height":{h}}},"inputs":[{{"key":"time","type":"time","default":0}}],"assets":[{{"key":"img","kind":"image","mime":"{mime}","data":"{data}"}}],"root":{{"kind":"group","key":"root","children":[{node}]}}}}"#
+    )
+}
+
+fn image_node(fit: &str, x: u32, y: u32, w: u32, h: u32, extra: &str) -> String {
+    format!(
+        r#"{{"kind":"image","key":"pic","asset":"img","frame":{{"x":{x},"y":{y},"width":{w},"height":{h}}},"fit":"{fit}"{extra}}}"#
+    )
+}
+
+fn decode(png: &[u8]) -> RgbaImage {
+    image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .unwrap()
+        .to_rgba8()
+}
+
+fn px(img: &RgbaImage, x: u32, y: u32) -> [u8; 4] {
+    img.get_pixel(x, y).0
+}
+
+fn is_red(p: [u8; 4]) -> bool {
+    p[0] > 150 && p[1] < 90 && p[2] < 90
+}
+fn is_green(p: [u8; 4]) -> bool {
+    p[1] > 130 && p[0] < 100 && p[2] < 100
+}
+fn is_blue(p: [u8; 4]) -> bool {
+    p[2] > 150 && p[0] < 90 && p[1] < 90
+}
+
+fn render_image_doc(doc: &str, t: f64, w: u32, h: u32) -> Vec<u8> {
+    take(render(doc, t, "{}", w, h)).unwrap_or_else(|| panic!("render failed: {}", last_error()))
+}
+
+#[test]
+fn image_still_renders_into_frame() {
+    let data = png_b64(&quadrants(2));
+    let doc = image_doc(
+        64,
+        64,
+        "image/png",
+        &data,
+        &image_node("fill", 0, 0, 64, 64, ""),
+    );
+    let out = render_image_doc(&doc, 0.0, 64, 64);
+    let img = decode(&out);
+    assert!(
+        is_red(px(&img, 16, 16)),
+        "TL should be red, got {:?}",
+        px(&img, 16, 16)
+    );
+    assert!(
+        is_green(px(&img, 48, 16)),
+        "TR should be green, got {:?}",
+        px(&img, 48, 16)
+    );
+    assert!(
+        is_blue(px(&img, 16, 48)),
+        "BL should be blue, got {:?}",
+        px(&img, 16, 48)
+    );
+}
+
+#[test]
+fn animated_gif_samples_frame_by_time() {
+    // Three solid frames, 100ms each → 300ms loop.
+    let frames = [
+        solid(4, 4, [220, 20, 20, 255]),
+        solid(4, 4, [20, 200, 20, 255]),
+        solid(4, 4, [20, 20, 220, 255]),
+    ];
+    let data = gif_b64(&frames, 100);
+    let doc = image_doc(
+        32,
+        32,
+        "image/gif",
+        &data,
+        &image_node("fill", 0, 0, 32, 32, ""),
+    );
+
+    let at = |t: f64| px(&decode(&render_image_doc(&doc, t, 32, 32)), 16, 16);
+    assert!(is_red(at(0.0)), "t=0 → frame 0 (red), got {:?}", at(0.0));
+    assert!(
+        is_green(at(0.15)),
+        "t=0.15 → frame 1 (green), got {:?}",
+        at(0.15)
+    );
+    assert!(
+        is_blue(at(0.25)),
+        "t=0.25 → frame 2 (blue), got {:?}",
+        at(0.25)
+    );
+    // t past the loop wraps: 0.35s → 350 mod 300 = 50ms → frame 0.
+    assert!(
+        is_red(at(0.35)),
+        "t=0.35 wraps to frame 0 (red), got {:?}",
+        at(0.35)
+    );
+}
+
+#[test]
+fn probe_reports_the_assets_manifest() {
+    let still = png_b64(&quadrants(2));
+    let anim = gif_b64(
+        &[solid(2, 2, [255, 0, 0, 255]), solid(2, 2, [0, 255, 0, 255])],
+        100,
+    );
+    let doc = format!(
+        r#"{{"version":1,"size":{{"width":16,"height":16}},"assets":[{{"key":"a","kind":"image","mime":"image/png","data":"{still}"}},{{"key":"b","kind":"image","mime":"image/gif","data":"{anim}"}}],"root":{{"kind":"group","key":"root","children":[]}}}}"#
+    );
+    let interface = probe(&doc).unwrap_or_else(|| panic!("probe failed: {}", last_error()));
+    let assets = interface["assets"].as_array().expect("assets manifest");
+    assert_eq!(assets.len(), 2);
+    assert_eq!(assets[0]["key"], "a");
+    assert_eq!(assets[0]["mime"], "image/png");
+    assert_eq!(assets[0]["animated"], false);
+    assert_eq!(assets[1]["key"], "b");
+    assert_eq!(assets[1]["animated"], true);
+}
+
+fn tall() -> RgbaImage {
+    // 8 wide x 16 tall: top half red, bottom half blue (aspect ≠ a square frame).
+    let mut img = RgbaImage::new(8, 16);
+    for y in 0..16 {
+        let c = if y < 8 {
+            [220, 20, 20, 255]
+        } else {
+            [20, 20, 220, 255]
+        };
+        for x in 0..8 {
+            img.put_pixel(x, y, Rgba(c));
+        }
+    }
+    img
+}
+
+#[test]
+fn corner_radius_clips_to_a_circle() {
+    let data = png_b64(&quadrants(2));
+    // cornerRadius = min(w,h)/2 → a circle inscribed in the 64x64 frame.
+    let node = image_node("fill", 0, 0, 64, 64, r#","cornerRadius":32"#);
+    let out = render_image_doc(&image_doc(64, 64, "image/png", &data, &node), 0.0, 64, 64);
+    let img = decode(&out);
+    assert!(
+        px(&img, 1, 1)[3] < 30,
+        "corner should be clipped transparent, got {:?}",
+        px(&img, 1, 1)
+    );
+    assert!(
+        px(&img, 32, 32)[3] > 200,
+        "center should be opaque, got {:?}",
+        px(&img, 32, 32)
+    );
+}
+
+#[test]
+fn fit_contain_letterboxes_transparent() {
+    let data = png_b64(&tall()); // 8x16 into 64x64 → scaled 32x64, centered
+    let node = image_node("contain", 0, 0, 64, 64, "");
+    let img = decode(&render_image_doc(
+        &image_doc(64, 64, "image/png", &data, &node),
+        0.0,
+        64,
+        64,
+    ));
+    assert!(
+        px(&img, 4, 32)[3] == 0,
+        "left margin is letterbox (transparent), got {:?}",
+        px(&img, 4, 32)
+    );
+    assert!(
+        is_red(px(&img, 32, 16)),
+        "top center red, got {:?}",
+        px(&img, 32, 16)
+    );
+    assert!(
+        is_blue(px(&img, 32, 48)),
+        "bottom center blue, got {:?}",
+        px(&img, 32, 48)
+    );
+}
+
+#[test]
+fn fit_cover_fills_the_frame() {
+    let data = png_b64(&tall()); // 8x16 into 64x64 → scaled 64x128, cropped, fills
+    let node = image_node("cover", 0, 0, 64, 64, "");
+    let img = decode(&render_image_doc(
+        &image_doc(64, 64, "image/png", &data, &node),
+        0.0,
+        64,
+        64,
+    ));
+    for (x, y) in [(1, 1), (62, 1), (1, 62), (62, 62)] {
+        assert!(
+            px(&img, x, y)[3] > 200,
+            "cover leaves no transparent corner at ({x},{y}), got {:?}",
+            px(&img, x, y)
+        );
+    }
+}
+
+#[test]
+fn frames_are_premultiplied() {
+    // Straight-alpha red at 50% → premultiplied RGBA output ≈ (128,0,0,128).
+    let data = png_b64(&solid(2, 2, [255, 0, 0, 128]));
+    let node = image_node("fill", 0, 0, 8, 8, "");
+    let bytes = render_rgba(&image_doc(8, 8, "image/png", &data, &node), 8, 8);
+    let center = ((4 * 8 + 4) * 4) as usize;
+    let p = &bytes[center..center + 4];
+    assert!(
+        (p[0] as i32 - 128).abs() <= 2,
+        "premul red ≈128, got {}",
+        p[0]
+    );
+    assert!(
+        p[1] <= 2 && p[2] <= 2,
+        "premul g/b ≈0, got {} {}",
+        p[1],
+        p[2]
+    );
+    assert!((p[3] as i32 - 128).abs() <= 2, "alpha ≈128, got {}", p[3]);
+}
+
+#[test]
+fn zero_duration_frames_become_100ms() {
+    // Two 0-delay frames → 100ms each (§4) → 200ms loop.
+    let data = gif_b64(
+        &[
+            solid(2, 2, [220, 20, 20, 255]),
+            solid(2, 2, [20, 20, 220, 255]),
+        ],
+        0,
+    );
+    let doc = image_doc(
+        16,
+        16,
+        "image/gif",
+        &data,
+        &image_node("fill", 0, 0, 16, 16, ""),
+    );
+    let at = |t: f64| px(&decode(&render_image_doc(&doc, t, 16, 16)), 8, 8);
+    assert!(is_red(at(0.05)), "50ms → frame 0, got {:?}", at(0.05));
+    assert!(is_blue(at(0.15)), "150ms → frame 1, got {:?}", at(0.15));
+}
+
+// --- §8 validation / budgets ------------------------------------------------
+
+fn asset_doc(mime: &str, data: &str) -> String {
+    format!(
+        r#"{{"version":1,"size":{{"width":16,"height":16}},"assets":[{{"key":"img","kind":"image","mime":"{mime}","data":"{data}"}}],"root":{{"kind":"group","key":"root","children":[]}}}}"#
+    )
+}
+
+fn assert_rejected(doc: &str, expected: &str) {
+    assert!(
+        probe(doc).is_none(),
+        "expected validation failure for {expected:?}"
+    );
+    let error = last_error();
+    assert!(
+        error.contains(expected),
+        "error {error:?} does not contain {expected:?}"
+    );
+}
+
+#[test]
+fn asset_dimensions_over_2048_are_rejected() {
+    let data = png_b64(&solid(2049, 1, [255, 0, 0, 255]));
+    assert_rejected(&asset_doc("image/png", &data), "exceeds the 2048x2048");
+}
+
+#[test]
+fn animated_asset_over_120_frames_is_rejected() {
+    let frames: Vec<RgbaImage> = (0..121).map(|_| solid(1, 1, [0, 0, 0, 255])).collect();
+    let data = gif_b64(&frames, 20);
+    assert_rejected(&asset_doc("image/gif", &data), "120-frame");
+}
+
+#[test]
+fn encoded_asset_over_2mb_is_rejected() {
+    // ~2.1 MB after base64-decode; the size guard fires before signature/decode.
+    let data = "A".repeat(2_800_000);
+    assert_rejected(&asset_doc("image/png", &data), "per-asset limit");
+}
+
+#[test]
+fn container_signature_must_match_mime() {
+    let gif = gif_b64(&[solid(2, 2, [255, 0, 0, 255])], 100);
+    assert_rejected(
+        &asset_doc("image/png", &gif),
+        "does not match declared mime",
+    );
+}
+
+#[test]
+fn malformed_base64_is_rejected() {
+    assert_rejected(
+        &asset_doc("image/png", "not*valid*base64"),
+        "malformed base64",
+    );
+}
+
+#[test]
+fn duplicate_asset_keys_are_rejected() {
+    let data = png_b64(&solid(2, 2, [255, 0, 0, 255]));
+    let doc = format!(
+        r#"{{"version":1,"size":{{"width":16,"height":16}},"assets":[{{"key":"img","kind":"image","mime":"image/png","data":"{data}"}},{{"key":"img","kind":"image","mime":"image/png","data":"{data}"}}],"root":{{"kind":"group","key":"root","children":[]}}}}"#
+    );
+    assert_rejected(&doc, "duplicate asset key");
+}
+
+#[test]
+fn image_node_referencing_unknown_asset_is_rejected() {
+    let data = png_b64(&solid(2, 2, [255, 0, 0, 255]));
+    let node = r#"{"kind":"image","key":"pic","asset":"missing","frame":{"x":0,"y":0,"width":16,"height":16}}"#;
+    assert_rejected(
+        &image_doc(16, 16, "image/png", &data, node),
+        "unknown asset \"missing\"",
+    );
+}
+
+#[test]
+fn image_node_accepts_transform_animators() {
+    // A solid-red image at x∈[0,16) shifted +16 by a unit-driven translateX
+    // (proves `image` is in the node-transform animator vocabulary and applies).
+    let data = png_b64(&solid(2, 2, [220, 20, 20, 255]));
+    let doc = format!(
+        r#"{{"version":1,"size":{{"width":32,"height":16}},"inputs":[{{"key":"p","type":"unit","default":1}}],"assets":[{{"key":"img","kind":"image","mime":"image/png","data":"{data}"}}],"root":{{"kind":"group","key":"root","children":[{{"kind":"image","key":"pic","asset":"img","frame":{{"x":0,"y":0,"width":16,"height":16}},"fit":"fill"}}]}},"animators":[{{"target":"pic","property":"translateX","driver":"p","from":0,"to":16}}]}}"#
+    );
+    let img = decode(&render_image_doc(&doc, 0.0, 32, 16));
+    assert!(
+        is_red(px(&img, 24, 8)),
+        "image shifted into x=24, got {:?}",
+        px(&img, 24, 8)
+    );
+    assert!(
+        px(&img, 4, 8)[3] == 0,
+        "original x=4 now empty, got {:?}",
+        px(&img, 4, 8)
+    );
+}
+
+#[test]
+fn animated_asset_handles_do_not_leak() {
+    let data = gif_b64(
+        &[
+            solid(8, 8, [255, 0, 0, 255]),
+            solid(8, 8, [0, 255, 0, 255]),
+            solid(8, 8, [0, 0, 255, 255]),
+        ],
+        40,
+    );
+    let doc = image_doc(
+        16,
+        16,
+        "image/gif",
+        &data,
+        &image_node("fill", 0, 0, 16, 16, ""),
+    );
+    let doc_c = CString::new(doc).unwrap();
+    for i in 0..200 {
+        let handle = kine_document_create(doc_c.as_ptr());
+        assert!(handle > 0, "create failed: {}", last_error());
+        let _ = take(kine_document_render_rgba(
+            handle,
+            i as f64 * 0.01,
+            std::ptr::null(),
+            16,
+            16,
+        ));
+        kine_document_free(handle);
+        assert!(
+            !crate::handle::contains(handle),
+            "handle {handle} (and its decoded frames) still live after free"
+        );
+    }
+}
+
+#[test]
+fn malformed_animated_webp_errors_not_aborts() {
+    // Valid RIFF/WEBP magic (passes the signature gate) with a garbage animated
+    // body. The C-ABI boundary must return an error, never abort — a panic
+    // through the iOS staticlib is a process kill. image-webp 0.2.5 fixes the
+    // historical ANMF+ALPH+zero-VP8 panic (issue #182); this holds the line.
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&[0x1c, 0, 0, 0]);
+    bytes.extend_from_slice(b"WEBP");
+    bytes.extend_from_slice(b"VP8X");
+    bytes.extend_from_slice(&[0x0a, 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let data = b64(&bytes);
+    assert!(
+        probe(&asset_doc("image/webp", &data)).is_none(),
+        "malformed webp must be a clean error, not an abort"
+    );
+}
+
+#[test]
+fn decoded_animation_over_32mb_is_rejected() {
+    // 3 frames at 2048x2048 = 48 MB decoded > 32 MB; rejected mid-decode with a
+    // bounded peak (frames are pulled one at a time).
+    let frame = solid(2048, 2048, [10, 20, 30, 255]);
+    let data = gif_b64(&[frame.clone(), frame.clone(), frame], 40);
+    assert_rejected(&asset_doc("image/gif", &data), "frames x w x h x 4");
+}
+
+#[test]
+fn image_goldens() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/features");
+    let regen = std::env::var_os("KINE_REGEN_GOLDENS").is_some();
+    if regen {
+        std::fs::create_dir_all(&dir).unwrap();
+    }
+
+    let still_doc = image_doc(
+        64,
+        64,
+        "image/png",
+        &png_b64(&quadrants(4)),
+        &image_node("cover", 0, 0, 64, 64, r#","cornerRadius":32"#),
+    );
+    let frames = [
+        solid(4, 4, [220, 20, 20, 255]),
+        solid(4, 4, [20, 200, 20, 255]),
+        solid(4, 4, [20, 20, 220, 255]),
+    ];
+    let anim_doc = image_doc(
+        32,
+        32,
+        "image/gif",
+        &gif_b64(&frames, 100),
+        &image_node("fill", 0, 0, 32, 32, ""),
+    );
+
+    let cases = [
+        ("image_still", render_image_doc(&still_doc, 0.0, 64, 64)),
+        ("image_anim_t0", render_image_doc(&anim_doc, 0.0, 32, 32)),
+        ("image_anim_t1", render_image_doc(&anim_doc, 0.15, 32, 32)),
+    ];
+    for (name, png) in &cases {
+        let path = dir.join(format!("{name}.png"));
+        if regen {
+            std::fs::write(&path, png).unwrap();
+            continue;
+        }
+        let golden = std::fs::read(&path)
+            .unwrap_or_else(|_| panic!("{name} golden missing — run KINE_REGEN_GOLDENS=1"));
+        assert_golden(name, png, &golden);
+    }
+}
+
+// --- animated-WebP compositing regression fixtures --------------------------
+//
+// Pure Rust cannot ENCODE animated WebP, so these are libwebp-built binaries
+// (crate/testdata/webp/regen.sh) decoded back through the normal document path.
+// Each guards a blend/dispose class that broke in image-webp 0.2.4 (pinned away
+// in Cargo.toml) — a future patch-rev bump that reintroduced the bug fails here.
+
+const WEBP_DISPOSE_GHOST: &[u8] = include_bytes!("../testdata/webp/a_dispose_ghost.webp");
+const WEBP_DISPOSE_LOSSY: &[u8] = include_bytes!("../testdata/webp/b_dispose_lossy.webp");
+const WEBP_BLEND_MODES: &[u8] = include_bytes!("../testdata/webp/c_blend_modes.webp");
+
+fn webp_doc(bytes: &[u8], w: u32, h: u32) -> String {
+    image_doc(
+        w,
+        h,
+        "image/webp",
+        &b64(bytes),
+        &image_node("fill", 0, 0, w, h, ""),
+    )
+}
+
+fn close(actual: [u8; 4], expected: [u8; 4], tol: i32) -> bool {
+    (0..4).all(|i| (actual[i] as i32 - expected[i] as i32).abs() <= tol)
+}
+
+/// libwebp animation "over" in straight alpha (integer), for the expected value.
+fn blend_over(src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
+    let (sa, da) = (src[3] as i32, dst[3] as i32);
+    if sa == 255 {
+        return src;
+    }
+    let dst_factor = da * (255 - sa) / 255;
+    let blend_a = sa + dst_factor;
+    if blend_a == 0 {
+        return [0, 0, 0, 0];
+    }
+    let ch = |s: u8, d: u8| ((s as i32 * sa + d as i32 * dst_factor) / blend_a) as u8;
+    [
+        ch(src[0], dst[0]),
+        ch(src[1], dst[1]),
+        ch(src[2], dst[2]),
+        blend_a as u8,
+    ]
+}
+
+#[test]
+fn webp_dispose_background_no_ghosting() {
+    let doc = webp_doc(WEBP_DISPOSE_GHOST, 6, 6);
+    // Frame 0 (t≈0.05): red 4x4 at (0,0), the rest transparent.
+    let f0 = decode(&render_image_doc(&doc, 0.05, 6, 6));
+    assert!(
+        is_red(px(&f0, 1, 1)),
+        "f0 red block, got {:?}",
+        px(&f0, 1, 1)
+    );
+    assert!(
+        px(&f0, 5, 5)[3] == 0,
+        "f0 outside transparent, got {:?}",
+        px(&f0, 5, 5)
+    );
+    // Frame 1 (t≈0.15): f0 disposed→background (transparent), only blue @(2,2).
+    let f1 = decode(&render_image_doc(&doc, 0.15, 6, 6));
+    assert!(
+        px(&f1, 1, 1)[3] == 0,
+        "no ghost: disposed f0 pixel transparent, got {:?}",
+        px(&f1, 1, 1)
+    );
+    assert!(
+        is_blue(px(&f1, 4, 4)),
+        "f1 blue block, got {:?}",
+        px(&f1, 4, 4)
+    );
+    assert!(
+        is_blue(px(&f1, 3, 3)),
+        "overlap shows f1 (blue) on top, got {:?}",
+        px(&f1, 3, 3)
+    );
+}
+
+#[test]
+fn webp_dispose_then_lossy_no_alpha_frame() {
+    let doc = webp_doc(WEBP_DISPOSE_LOSSY, 8, 8);
+    // Frame 1 (t≈0.15): f0 (full red) disposed→transparent; lossy green 4x4 @(2,2).
+    let f1 = decode(&render_image_doc(&doc, 0.15, 8, 8));
+    assert!(
+        px(&f1, 0, 0)[3] == 0,
+        "disposed full-frame region cleared, got {:?}",
+        px(&f1, 0, 0)
+    );
+    let g = px(&f1, 4, 4);
+    assert!(
+        g[1] > 180 && g[0] < 90 && g[2] < 90 && g[3] > 240,
+        "lossy green frame, got {:?}",
+        g
+    );
+    assert!(
+        px(&f1, 7, 7)[3] == 0,
+        "neighbour untouched (transparent), got {:?}",
+        px(&f1, 7, 7)
+    );
+    // Frame 0 (t≈0.05): full red.
+    let f0 = decode(&render_image_doc(&doc, 0.05, 8, 8));
+    assert!(
+        is_red(px(&f0, 4, 4)),
+        "f0 full red, got {:?}",
+        px(&f0, 4, 4)
+    );
+}
+
+#[test]
+fn webp_no_blend_vs_alpha_blend() {
+    let doc = webp_doc(WEBP_BLEND_MODES, 8, 8);
+    // Frame 2 (t≈0.25): f0 red@128 canvas; f1 NO_BLEND green@200 @(0,0,4,4);
+    // f2 ALPHA_BLEND blue@128 @(0,4,4,4) over the red@128 beneath it.
+    let f2 = decode(&render_image_doc(&doc, 0.25, 8, 8));
+    // NO_BLEND replaces canvas pixels outright (ignores the red@128 beneath).
+    assert!(
+        close(px(&f2, 2, 2), [0, 220, 0, 200], 2),
+        "no-blend replace = green@200, got {:?}",
+        px(&f2, 2, 2)
+    );
+    // Untouched canvas keeps frame 0.
+    assert!(
+        close(px(&f2, 6, 2), [255, 0, 0, 128], 2),
+        "untouched red@128, got {:?}",
+        px(&f2, 6, 2)
+    );
+    // ALPHA_BLEND: blue@128 over red@128 (libwebp straight-alpha "over").
+    let expected = blend_over([0, 0, 255, 128], [255, 0, 0, 128]);
+    assert!(
+        close(px(&f2, 2, 6), expected, 2),
+        "alpha-blend over red@128 ≈ {expected:?}, got {:?}",
+        px(&f2, 2, 6)
+    );
+}
+
+#[test]
+fn decoded_animation_at_exactly_32mb_is_accepted() {
+    // 2 frames of 2048x2048 = 2*2048*2048*4 = 33554432 = exactly 32 MiB. The cap
+    // is `> MAX`, so the boundary value is accepted (guards a `>`→`>=` regression).
+    let frame = solid(2048, 2048, [10, 20, 30, 255]);
+    let data = gif_b64(&[frame.clone(), frame], 40);
+    let doc = image_doc(
+        2048,
+        2048,
+        "image/gif",
+        &data,
+        &image_node("fill", 0, 0, 2048, 2048, ""),
+    );
+    assert!(
+        probe(&doc).is_some(),
+        "exactly-32MiB decoded must be accepted; err: {}",
+        last_error()
     );
 }

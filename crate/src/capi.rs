@@ -219,11 +219,31 @@ fn interface_json(compiled: &crate::validate::Compiled) -> serde_json::Value {
         })
         .collect();
 
+    // Assets manifest in document order (§4): key, kind, mime, and whether the
+    // decoded asset has more than one frame.
+    let assets: Vec<serde_json::Value> = compiled
+        .doc
+        .assets
+        .iter()
+        .map(|asset| {
+            // Every doc asset has a decoded entry (decode_all inserts one per
+            // element and rejects duplicate keys), so index rather than guard.
+            let animated = compiled.assets[&asset.key].animated();
+            json!({
+                "key": asset.key,
+                "kind": asset.kind.as_str(),
+                "mime": asset.mime.as_str(),
+                "animated": animated,
+            })
+        })
+        .collect();
+
     json!({
         "version": compiled.doc.version,
         "size": { "width": compiled.doc.size.width, "height": compiled.doc.size.height },
         "inputs": inputs,
         "roles": compiled.roles,
+        "assets": assets,
     })
 }
 
@@ -290,7 +310,8 @@ fn render_scene(
     } else {
         parse_json(cstr(signals_json, "signals")?, "signals")?
     };
-    let scene = crate::eval::evaluate(&compiled.doc, &signals, t).map_err(|e| e.to_string())?;
+    let scene = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, t)
+        .map_err(|e| e.to_string())?;
     match encoding {
         Encoding::Png => render::render_png(&scene, width, height),
         Encoding::Rgba => render::render_rgba(&scene, width, height),

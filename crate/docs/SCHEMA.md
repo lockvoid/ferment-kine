@@ -28,7 +28,7 @@ write time, never on device.
 - `size` — design box in abstract units (author px-like). The renderer maps
   the design box onto the target with scale `(W/width, H/height)`; callers
   are expected to keep the target aspect-correct.
-- `assets` — reserved, must be `[]` in v1. Fonts are never assets — always
+- `assets` — embedded raster assets (§4). Fonts are never assets — always
   referenced by family name and resolved against the registered collection.
 
 ## 2. Inputs
@@ -133,13 +133,61 @@ input set (§6 step 4). Functions are pure; results are ordinary colors.
 
 `{ "fn": "mix", "a": ref, "b": ref, "t": t }`
 - `t` ∈ [0,1]. Oklab premultiplied interpolation from `a` (t=0) to `b`
-  (t=1) — the same lerp animators use (§5). lighten/darken are
+  (t=1) — the same lerp animators use (§6). lighten/darken are
   deliberately NOT functions: mix with white/black.
 
-Reserved (§8): `nearest` (min-ΔE snap to candidates — the quantize cousin
+Reserved (§9): `nearest` (min-ΔE snap to candidates — the quantize cousin
 of contrast), hue rotation, lighten/darken sugar.
 
-## 4. Nodes
+## 4. Assets
+
+Embedded raster assets — the document stays a single JSON artifact.
+
+```json
+"assets": [
+  { "key": "avatar",  "kind": "image", "mime": "image/png",  "data": "<base64>" },
+  { "key": "sticker", "kind": "image", "mime": "image/gif",  "data": "<base64>" }
+]
+```
+
+- `key`: `[a-z][a-zA-Z0-9]*`, unique across the table.
+- `kind`: `image` (the only kind in v1).
+- `mime`: `image/png | image/jpeg | image/webp | image/gif | image/apng`.
+  Animated formats (gif, apng, animated webp) are first-class.
+- `data`: base64 of the encoded file. There is no other source form in
+  v1 (`href` host-resolved references are reserved, §9).
+
+Budgets — HARD validation errors, checked from container headers BEFORE
+full decode (the decode-bomb guard, including its time axis):
+
+| limit | value |
+|---|---|
+| encoded size per asset | ≤ 2 MB |
+| encoded total per document | ≤ 4 MB |
+| pixel dimensions | ≤ 2048 × 2048 |
+| frames per animated asset | ≤ 120 |
+| decoded size per asset (`frames × w × h × 4`) | ≤ 32 MB |
+
+Decoding happens once at document load: all frames composited
+(blend/dispose resolved) and premultiplied; the document handle owns that
+memory for its lifetime — which is what the decoded budget bounds.
+Embedded ICC color profiles are ignored in v1 — asset pixels are taken as
+sRGB.
+
+**Animated sampling rule**: an animated asset displays the frame at
+`time mod loopDuration`, where `time` is the standard input and
+`loopDuration` is the sum of the asset's frame durations. Looping is
+implicit; there are no speed/loop/remap controls in v1 (reserved). With
+no `time` signal supplied, the default (0) shows the first frame — so
+standalone/preview renders are well-defined. Zero-duration frames are
+treated as 100ms (the de-facto browser rule). This keeps animated assets
+inside the pure-function contract: a pre-baked animation is just a
+function of the `time` input.
+
+Assets appear in documents through the `image` node (§5). Probe emits an
+assets manifest: `[{ key, kind, mime, animated }]`.
+
+## 5. Nodes
 
 Common: `kind`, `key` (doc-unique, `[a-zA-Z][a-zA-Z0-9_-]*`, immutable),
 optional `role` (doc-unique string; compile-time composition address — in/out
@@ -182,6 +230,27 @@ Paints: `solid` (color) · `linearGradient` (x1, y1, x2, y2, `stops:
 
 `fill` and `stroke` are each optional; at least one required.
 
+### image
+
+```json
+{ "kind": "image", "key": "avatar",
+  "asset": "avatar",
+  "frame": { "x": 420, "y": 640, "width": 240, "height": 240 },
+  "fit": "cover",
+  "cornerRadius": 120,
+  "opacity": 1 }
+```
+
+- `asset` — key of an entry in the assets table (§4).
+- `fit`: `cover` (default) | `contain` | `fill` — how the decoded image
+  maps onto `frame`.
+- `cornerRadius` — rounded clip of the frame; `min(width, height) / 2`
+  yields a circle. Optional (0).
+- `frame` and `fit` are layout — not animatable. Transform/opacity follow
+  the standard vocabulary. Animated assets sample by the §4 rule; the
+  node needs no extra fields for animation.
+- Image-as-paint (image fills on shapes) is reserved (§9).
+
 ### text
 
 ```json
@@ -206,7 +275,7 @@ Paints: `solid` (color) · `linearGradient` (x1, y1, x2, y2, `stops:
 - `activeFill` — the karaoke secondary color: units at weight 1.0 render
   `activeFill`, weight 0.0 render `fill`, interpolated between (Oklab). It is
   a styling primitive; no animator required for a plain karaoke color swap
-  when a `color`-property animator is present — see §5.
+  when a `color`-property animator is present — see §6.
 - `pill` — background box per WORD, behind glyphs, following per-word bounds
   (+padding, radius). Pill opacity/color animate per-unit like glyph props.
 - `stroke`/`shadow`/`pill`/`activeFill` optional.
@@ -217,7 +286,7 @@ Layout-affecting values (`frame`, `size`, `align`, `lineHeight`,
 `letterSpacing`, `fontFamily`, `weight`, `content`) are NOT animatable —
 paint and transform only (continuous animation never triggers re-layout).
 
-## 5. Animators
+## 6. Animators
 
 Ordered list; evaluation order = document order; later animators compose on
 top of earlier ones.
@@ -307,7 +376,7 @@ that keyframe; `ease` on the first keyframe is invalid.
 
 | target kind        | properties                                             |
 |--------------------|--------------------------------------------------------|
-| group, shape, text | `opacity`, `translateX`, `translateY`, `scale`, `scaleX`, `scaleY`, `rotate` |
+| group, shape, text, image | `opacity`, `translateX`, `translateY`, `scale`, `scaleX`, `scaleY`, `rotate` |
 | shape              | `color` (solid fill), `strokeColor`                    |
 | text (node-level)  | `color` (fill), `strokeColor`, `shadowColor`           |
 | text sub-units     | `opacity`, `translateX`, `translateY`, `scale`, `rotate`, `color`, `pillColor`, `pillOpacity` |
@@ -322,30 +391,37 @@ Default space: **Oklab, premultiplied alpha**. Per-animator override:
 `"hue": "shorter" | "longer" | "increasing" | "decreasing"` (default
 shorter). Gamut-map at output, never clamp mid-interpolation.
 
-## 6. Evaluation semantics
+## 7. Evaluation semantics
 
-1. Parse strictly; validate (§7).
-2. Bake springs to points curves.
-3. Resolve input values: supplied signal or default; clamp per type.
+1. Parse strictly; validate (§8).
+2. Decode assets once (at document load): frames composited
+   (blend/dispose resolved) and premultiplied; held by the handle.
+3. Bake springs to points curves.
+4. Resolve input values: supplied signal or default; clamp per type.
    The C-ABI `t` argument is sugar for the `time` input; an explicit
    `time` signal wins.
-4. Resolve the colors table in declaration order (override input if
+5. Resolve the colors table in declaration order (override input if
    supplied, else the computed value); then resolve bindings and `{color}`
    references in node properties.
-5. Apply animators in document order. For each: compute driver value
+6. Apply animators in document order. For each: compute driver value
    (or per-unit weights), map through keyframes/ease, compose onto the
    current property value (`replace`/`add`/`multiply`), apply `amount`.
-6. Build the scene: groups nest transforms; text lays out once (layout is
-   static per input set); per-unit deltas apply at draw time per glyph run.
+7. Build the scene: groups nest transforms; text lays out once (layout is
+   static per input set); per-unit deltas apply at draw time per glyph
+   run; animated assets sample their frame by the §4 rule.
 
 Determinism: identical document + identical signals ⇒ identical pixels,
 on every platform, forever. No randomness at render (stagger `random` is
 seeded and baked at load), no clocks, no environment reads.
 
-## 7. Validation (load-time hard errors)
+## 8. Validation (load-time hard errors)
 
 - unknown field / unknown enum value anywhere
-- `version` ≠ 1; `assets` ≠ []
+- `version` ≠ 1
+- assets: duplicate `key`; unknown `kind`/`mime`; malformed base64 or a
+  payload whose container signature contradicts `mime`; any §4 budget
+  exceeded (checked from headers before decode); an `image` node's
+  `asset` referencing an unknown key
 - duplicate node `key` / duplicate `role` / duplicate input `key`
 - animator `target` key that doesn't resolve; `.glyphs`-style target on a
   non-text node; `property` not in the vocabulary for the target
@@ -361,17 +437,16 @@ seeded and baked at load), no clocks, no environment reads.
   entry; unknown `fn`; fn argument out of domain; `override` binding a
   non-color input; `{ "color": … }` reference to an unknown entry
 
-`probe` returns `{ "version", "size", "inputs": [...], "roles": [...] }`
-for a valid document, or the first validation error via the error channel.
+`probe` returns `{ "version", "size", "inputs": [...], "roles": [...],
+"assets": [...] }` (assets manifest per §4) for a valid document, or the
+first validation error via the error channel.
 
-## 8. Reserved for later versions (designed slots, no code)
+## 9. Reserved for later versions (designed slots, no code)
 
-`assets` — grammar decided, not yet built: entries
-`{ key, kind, mime, data (base64) | href (host-resolved reference) }`.
-Embedded base64 for small decorative bytes with HARD size budgets at
-validation (per-asset and per-document caps); `href` for anything larger,
-resolved by the host like fonts. Documents stay single-artifact JSON —
-no container format.
+Assets: `href` source form (host-resolved references registered like
+fonts, for cross-document reuse), image-as-paint (image fills on shapes),
+image-typed inputs (runtime image swapping), per-node time
+remapping/speed/loop controls for animated assets.
 
 Also reserved: group `clip` shapes, filter/effect nodes
 (engine post-pass territory), converter chains between driver and curve,

@@ -60,7 +60,7 @@ pub struct Document {
     #[serde(default)]
     pub colors: Vec<ColorEntry>,
     #[serde(default)]
-    pub assets: Vec<serde_json::Value>,
+    pub assets: Vec<Asset>,
     pub root: Node,
     #[serde(default)]
     pub animators: Vec<Animator>,
@@ -354,6 +354,61 @@ impl<'de> Deserialize<'de> for ColorValue {
     }
 }
 
+// --- assets (§4) -------------------------------------------------------------
+
+/// An embedded raster asset. `data` is base64 of the encoded file; decoding,
+/// budget enforcement, and container-signature checks happen at load (assets.rs).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Asset {
+    pub key: String,
+    pub kind: AssetKind,
+    pub mime: ImageMime,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AssetKind {
+    Image,
+}
+
+impl AssetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AssetKind::Image => "image",
+        }
+    }
+}
+
+/// The declared container format. Animated forms (gif, apng, webp) are
+/// first-class; png/jpeg are always single-frame.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub enum ImageMime {
+    #[serde(rename = "image/png")]
+    Png,
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    #[serde(rename = "image/webp")]
+    Webp,
+    #[serde(rename = "image/gif")]
+    Gif,
+    #[serde(rename = "image/apng")]
+    Apng,
+}
+
+impl ImageMime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImageMime::Png => "image/png",
+            ImageMime::Jpeg => "image/jpeg",
+            ImageMime::Webp => "image/webp",
+            ImageMime::Gif => "image/gif",
+            ImageMime::Apng => "image/apng",
+        }
+    }
+}
+
 // --- bindings ----------------------------------------------------------------
 
 /// A leaf value: literal, or `{ "input": "key" }` binding of matching type.
@@ -393,6 +448,7 @@ struct BindingRef {
 pub enum Node {
     Group(GroupNode),
     Shape(ShapeNode),
+    Image(ImageNode),
     Text(Box<TextNode>),
 }
 
@@ -401,6 +457,7 @@ impl Node {
         match self {
             Node::Group(n) => &n.key,
             Node::Shape(n) => &n.key,
+            Node::Image(n) => &n.key,
             Node::Text(n) => &n.key,
         }
     }
@@ -409,9 +466,37 @@ impl Node {
         match self {
             Node::Group(n) => n.role.as_deref(),
             Node::Shape(n) => n.role.as_deref(),
+            Node::Image(n) => n.role.as_deref(),
             Node::Text(n) => n.role.as_deref(),
         }
     }
+}
+
+/// An `image` node: an assets-table entry drawn into `frame` per `fit`, with an
+/// optional rounded clip. Transform/opacity follow the standard animator
+/// vocabulary; animated assets sample by the §4 rule (no per-node fields).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ImageNode {
+    pub key: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    pub asset: String,
+    pub frame: Frame,
+    #[serde(default)]
+    pub fit: Option<Fit>,
+    #[serde(default)]
+    pub corner_radius: Option<Bindable<f64>>,
+    #[serde(default)]
+    pub opacity: Option<Bindable<f64>>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Fit {
+    Cover,
+    Contain,
+    Fill,
 }
 
 #[derive(Debug, Clone, Deserialize)]

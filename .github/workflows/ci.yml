@@ -81,7 +81,7 @@ jobs:
       # since the animated WebP varies by ffmpeg build) and confirm it matches the
       # committed asset — the README demo is a golden and can't silently lie.
       - run: ruby scripts/render-readme-assets.rb
-      - run: git diff --exit-code -- docs/assets/social.png docs/assets/palette.png docs/assets/pulse.png
+      - run: git diff --exit-code -- docs/assets/social.png docs/assets/palette.png docs/assets/pulse.png docs/assets/star_repo.png docs/assets/subscribe.png
 
   cross-arch-goldens:
     # Informational, not a gate: regenerate goldens on x86 and report whether

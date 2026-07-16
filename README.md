@@ -1,4 +1,4 @@
-# kine
+# Kine
 
 [![CI](https://github.com/lockvoid/ferment-kine/actions/workflows/ci.yml/badge.svg)](https://github.com/lockvoid/ferment-kine/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -107,6 +107,40 @@ because both are just `f(time)`. ([`docs/pulse.json`](docs/pulse.json))
 ]
 ```
 
+## Bring your own stickers
+
+An `image` node drops an **animated GIF / WebP / APNG** straight into a document,
+where kine's own text and motion compose right on top of it — one file, one
+`(time) → frame`. The sticker's frames sample by the `time` input; the headline
+and the sticker's bounce are ordinary kine animators sharing the same clock, so
+the whole loop closes seamlessly.
+
+<img src="docs/assets/star_repo.webp" width="380" alt="STAR THE REPO — animated star sticker + kine headline">
+&nbsp;
+<img src="docs/assets/subscribe.webp" width="380" alt="NEW REELS WEEKLY — animated follow sticker + kine headline">
+
+```jsonc
+"assets": [ { "key": "st", "kind": "image", "mime": "image/gif", "data": "<base64 GIF>" } ],
+"root": { "children": [
+  { "kind": "image", "key": "stars", "asset": "st",
+    "frame": { "x": 40, "y": 46, "width": 168, "height": 168 }, "fit": "contain" },
+  { "kind": "text",  "key": "head", "content": "STAR THE REPO", "…": "…" }
+] },
+"animators": [
+  { "target": "stars", "property": "scale", "driver": "time", "period": 1.98,
+    "keyframes": [ { "at": 0, "value": 0.9 },
+      { "at": 0.32, "value": 1.08, "ease": { "spring": { "bounce": 0.45, "duration": 0.5 } } },
+      { "at": 1, "value": 0.9, "ease": "easeIn" } ] },
+  { "target": "head.glyphs", "property": "translateY",
+    "weight": { "stagger": { "driver": "time", "period": 0.99, "total": 0.7, "from": "start" } },
+    "keyframes": [ { "at": 0, "value": 0 }, { "at": 0.5, "value": -9 }, { "at": 1, "value": 0 } ] }
+]
+```
+
+<sub>Sticker GIFs via [KLIPY](https://klipy.com) (used under their API terms) —
+re-fetch with [`scripts/fetch-stickers.sh`](scripts/fetch-stickers.sh); both
+demos are built by [`scripts/render-readme-assets.rb`](scripts/render-readme-assets.rb).</sub>
+
 ## What it does
 
 - **Typed, defaulted inputs** — every document renders standalone; signals are
@@ -115,6 +149,9 @@ because both are just `f(time)`. ([`docs/pulse.json`](docs/pulse.json))
   (HarfRust, RTL included), with a karaoke seam driven by transcript activations.
 - **Document-level color derivation** in Oklab — `alpha`, `contrast`, `mix` — so
   one accent becomes a whole palette, identically on every platform.
+- **Embedded raster assets** — PNG / JPEG / WebP / GIF / APNG drawn by `image`
+  nodes (fit + rounded clip); animated formats composite once at load and sample
+  by the `time` input, all inside the pure-function contract.
 - **Springs baked to pure curves** — Apple-style `{ bounce, duration }`,
   evaluated as a plain `f(progress)`.
 - **Deterministic** — identical inputs, identical pixels, every platform, forever.

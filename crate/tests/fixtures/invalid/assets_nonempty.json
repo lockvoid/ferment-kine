@@ -1,4 +1,0 @@
-{ "version": 1, "size": { "width": 64, "height": 64 }, "assets": [ { "id": "x" } ],
-  "root": { "kind": "shape", "key": "dot",
-    "geometry": { "kind": "ellipse", "cx": 32, "cy": 32, "rx": 20, "ry": 20 },
-    "fill": { "kind": "solid", "color": "#FF0000" } } }

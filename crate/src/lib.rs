@@ -8,6 +8,7 @@
 //! embedding — one API surface, many hosts. All logic lives in [`render`] and
 //! [`fonts`]; `capi` is glue only.
 
+mod assets;
 mod capi;
 mod error;
 mod eval;

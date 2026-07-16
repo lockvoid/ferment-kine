@@ -6,18 +6,22 @@ use std::collections::{HashMap, HashSet};
 
 use color::{AlphaColor, Srgb};
 
+use crate::assets::{decode_all, DecodedAssets};
 use crate::schema::*;
 
-/// A validated document: springs baked to points curves, roles collected.
+/// A validated document: springs baked to points curves, roles collected, and
+/// every asset decoded to premultiplied frames (owned for the handle's life).
 pub struct Compiled {
     pub doc: Document,
     pub roles: Vec<String>,
+    pub assets: DecodedAssets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Group,
     Shape,
+    Image,
     Text,
 }
 
@@ -43,9 +47,6 @@ pub fn validate(mut doc: Document) -> Result<Compiled, SchemaError> {
             format!("must be 1, got {}", doc.version),
         ));
     }
-    if !doc.assets.is_empty() {
-        return Err(SchemaError::new("assets", "must be [] in v1"));
-    }
     let size_ok = |v: f64| v.is_finite() && v > 0.0;
     if !size_ok(doc.size.width) || !size_ok(doc.size.height) {
         return Err(SchemaError::new(
@@ -56,6 +57,10 @@ pub fn validate(mut doc: Document) -> Result<Compiled, SchemaError> {
 
     let inputs = check_inputs(&doc.inputs)?;
     let colors = check_colors(&doc.colors, &inputs)?;
+    // Validate + decode assets up front: image nodes resolve against these keys,
+    // and decoding is part of document load (§7 step 2).
+    let assets = decode_all(&doc.assets)?;
+    let asset_keys: HashSet<String> = assets.keys().cloned().collect();
 
     let mut nodes: HashMap<String, NodeKind> = HashMap::new();
     let mut node_meta: HashMap<String, NodeInfo> = HashMap::new();
@@ -66,6 +71,7 @@ pub fn validate(mut doc: Document) -> Result<Compiled, SchemaError> {
         "root",
         &inputs,
         &colors,
+        &asset_keys,
         &mut nodes,
         &mut node_meta,
         &mut roles,
@@ -79,7 +85,7 @@ pub fn validate(mut doc: Document) -> Result<Compiled, SchemaError> {
 
     bake_document_springs(&mut doc)?;
 
-    Ok(Compiled { doc, roles })
+    Ok(Compiled { doc, roles, assets })
 }
 
 /// Facts about a node that animator checks need beyond its kind.
@@ -192,6 +198,7 @@ fn check_node(
     path: &str,
     inputs: &HashMap<String, &'static str>,
     colors: &HashSet<String>,
+    assets: &HashSet<String>,
     nodes: &mut HashMap<String, NodeKind>,
     node_meta: &mut HashMap<String, NodeInfo>,
     roles: &mut Vec<String>,
@@ -207,6 +214,7 @@ fn check_node(
     let kind = match node {
         Node::Group(_) => NodeKind::Group,
         Node::Shape(_) => NodeKind::Shape,
+        Node::Image(_) => NodeKind::Image,
         Node::Text(_) => NodeKind::Text,
     };
     if nodes.insert(key.to_string(), kind).is_some() {
@@ -245,6 +253,7 @@ fn check_node(
                     &format!("{path}.children[{index}]"),
                     inputs,
                     colors,
+                    assets,
                     nodes,
                     node_meta,
                     roles,
@@ -271,6 +280,21 @@ fn check_node(
                 )?;
                 check_binding_number(&stroke.width, &format!("{path}.stroke.width"), inputs)?;
             }
+        }
+        Node::Image(image) => {
+            if !assets.contains(&image.asset) {
+                return Err(SchemaError::new(
+                    format!("{path}.asset"),
+                    format!("references unknown asset \"{}\"", image.asset),
+                ));
+            }
+            check_frame(&image.frame, &format!("{path}.frame"), inputs)?;
+            check_opt_binding_number(
+                &image.corner_radius,
+                &format!("{path}.cornerRadius"),
+                inputs,
+            )?;
+            check_opt_binding_number(&image.opacity, &format!("{path}.opacity"), inputs)?;
         }
         Node::Text(text) => {
             check_binding_string(&text.content, &format!("{path}.content"), inputs)?;

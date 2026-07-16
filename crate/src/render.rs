@@ -15,11 +15,11 @@ use parley::{
 };
 
 use crate::eval::{
-    self, stagger_weights, Color, MapValue, RNode, RPaint, RShape, RText, RUnitAnimator, RWeight,
-    Scene, UnitProperty,
+    self, stagger_weights, Color, MapValue, RImage, RNode, RPaint, RShape, RText, RUnitAnimator,
+    RWeight, Scene, UnitProperty,
 };
 use crate::fonts;
-use crate::schema::{Align, LineCap, LineJoin, VAlign};
+use crate::schema::{Align, Fit, LineCap, LineJoin, VAlign};
 use crate::validate::UnitLevel;
 
 /// Render to a PNG blob (RGBA8, straight/un-premultiplied alpha per PNG).
@@ -93,6 +93,11 @@ fn draw_node(
         RNode::Shape(shape) => {
             let layered = push_opacity(ctx, shape.opacity);
             draw_shape(ctx, shape, parent);
+            pop_opacity(ctx, layered);
+        }
+        RNode::Image(image) => {
+            let layered = push_opacity(ctx, image.opacity);
+            draw_image(ctx, image, parent);
             pop_opacity(ctx, layered);
         }
         RNode::Text(text) => {
@@ -176,6 +181,64 @@ fn color_stops(stops: &[(f32, Color)]) -> Vec<ColorStop> {
         .iter()
         .map(|(at, color)| ColorStop::from((*at, DynamicColor::from_alpha_color(*color))))
         .collect()
+}
+
+// --- images ---------------------------------------------------------------------
+
+/// Draw a (sampled) image frame into `frame` per `fit`, clipped to the rounded
+/// frame. `cover`/`fill` cover the frame (overflow cropped by the clip);
+/// `contain` letterboxes (the empty margin stays transparent — only the placed
+/// rect is filled). The paint transform maps texel space onto the placed rect in
+/// document coordinates; the standard node transform/opacity apply around it.
+fn draw_image(ctx: &mut RenderContext, image: &RImage, parent: Affine) {
+    use vello_common::paint::{Image, ImageSource};
+    use vello_cpu::peniko::{Extend, ImageQuality, ImageSampler};
+
+    let iw = image.image.width() as f64;
+    let ih = image.image.height() as f64;
+    let frame = image.frame;
+    let (fw, fh) = (frame.width(), frame.height());
+    if iw <= 0.0 || ih <= 0.0 || fw <= 0.0 || fh <= 0.0 {
+        return;
+    }
+
+    let (sx, sy) = match image.fit {
+        Fit::Fill => (fw / iw, fh / ih),
+        Fit::Cover => {
+            let s = (fw / iw).max(fh / ih);
+            (s, s)
+        }
+        Fit::Contain => {
+            let s = (fw / iw).min(fh / ih);
+            (s, s)
+        }
+    };
+    let placed_w = iw * sx;
+    let placed_h = ih * sy;
+    let px = frame.x0 + (fw - placed_w) * 0.5;
+    let py = frame.y0 + (fh - placed_h) * 0.5;
+    let fit_affine = Affine::translate((px, py)) * Affine::scale_non_uniform(sx, sy);
+    let placed = Rect::new(px, py, px + placed_w, py + placed_h);
+
+    let radius = image.corner_radius.max(0.0);
+    let clip = RoundedRect::from_rect(frame, radius).to_path(0.1);
+
+    ctx.set_transform(parent * image.transform);
+    ctx.push_clip_layer(&clip);
+    let paint = Image {
+        image: ImageSource::Pixmap(image.image.clone()),
+        sampler: ImageSampler {
+            x_extend: Extend::Pad,
+            y_extend: Extend::Pad,
+            quality: ImageQuality::Medium,
+            alpha: 1.0,
+        },
+    };
+    ctx.set_paint(paint);
+    ctx.set_paint_transform(fit_affine);
+    ctx.fill_rect(&placed);
+    ctx.set_paint_transform(Affine::IDENTITY);
+    ctx.pop_layer();
 }
 
 // --- text ------------------------------------------------------------------------
