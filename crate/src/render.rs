@@ -4,7 +4,7 @@
 //! eval's resolved types; values were decided upstream.
 
 use vello_common::filter_effects::{Filter, FilterFunction};
-use vello_cpu::kurbo::{Affine, Point, Rect, RoundedRect, Shape as KurboShape, Stroke, Vec2};
+use vello_cpu::kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape as KurboShape, Stroke, Vec2};
 use vello_cpu::peniko::color::DynamicColor;
 use vello_cpu::peniko::{ColorStop, Gradient};
 use vello_cpu::{Glyph, Pixmap, RenderContext, RenderSettings, Resources};
@@ -18,27 +18,53 @@ use crate::eval::{
     self, stagger_weights, Color, MapValue, RImage, RNode, RPaint, RShape, RText, RUnitAnimator,
     RWeight, Scene, UnitProperty,
 };
+use crate::bubble;
 use crate::fonts;
 use crate::schema::{Align, Fit, LineCap, LineJoin, VAlign};
 use crate::validate::UnitLevel;
 
 /// Render to a PNG blob (RGBA8, straight/un-premultiplied alpha per PNG).
 pub fn render_png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    render_pixmap(scene, width, height)?
+    render_pixmap(scene, width, height, (0.0, scene.height))?
         .into_png()
         .map_err(|e| format!("PNG encoding failed: {e}"))
+}
+
+/// Render a vertical design-space VIEWPORT `(view_y, view_h)` of the scene
+/// into the target — the grown-canvas companion to `grown_extents`: pass
+/// its `(top, bottom - top)` and a target sized to the grown aspect, and
+/// text that overflows the doc canvas renders instead of cropping.
+/// `(0, scene.height)` is exactly the plain render.
+pub fn render_rgba_viewport(
+    scene: &Scene,
+    width: u32,
+    height: u32,
+    view_y: f64,
+    view_h: f64,
+) -> Result<Vec<u8>, String> {
+    if view_h <= 0.0 || !view_y.is_finite() || !view_h.is_finite() {
+        return Err(format!("invalid viewport y={view_y} h={view_h}"));
+    }
+    Ok(render_pixmap(scene, width, height, (view_y, view_h))?
+        .data_as_u8_slice()
+        .to_vec())
 }
 
 /// Render to raw RGBA8 bytes: premultiplied alpha, sRGB, row-major, stride =
 /// width*4, len = width*height*4. This is what texture-upload clients want (no
 /// PNG round-trip). Note: premultiplied, unlike `render_png` (straight alpha).
 pub fn render_rgba(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    Ok(render_pixmap(scene, width, height)?
+    Ok(render_pixmap(scene, width, height, (0.0, scene.height))?
         .data_as_u8_slice()
         .to_vec())
 }
 
-fn render_pixmap(scene: &Scene, width: u32, height: u32) -> Result<Pixmap, String> {
+fn render_pixmap(
+    scene: &Scene,
+    width: u32,
+    height: u32,
+    viewport: (f64, f64),
+) -> Result<Pixmap, String> {
     // 8192x8192 = 256 MB of RGBA — generous for real exports (covers 8K), and a
     // hard ceiling so a valid-per-dimension but enormous request (e.g. 65535x65535
     // ≈ 17 GB) is rejected rather than OOM-killing the process.
@@ -66,7 +92,9 @@ fn render_pixmap(scene: &Scene, width: u32, height: u32) -> Result<Pixmap, Strin
     let mut ctx = RenderContext::new_with(width as u16, height as u16, settings);
     let mut resources = Resources::new();
 
-    let root = Affine::scale_non_uniform(width as f64 / scene.width, height as f64 / scene.height);
+    let (view_y, view_h) = viewport;
+    let root = Affine::scale_non_uniform(width as f64 / scene.width, height as f64 / view_h)
+        * Affine::translate((0.0, -view_y));
     draw_node(&mut ctx, &mut resources, &scene.root, root)?;
 
     let mut pixmap = Pixmap::new(width as u16, height as u16);
@@ -296,15 +324,11 @@ impl UnitTransform {
     }
 }
 
-fn draw_text(
-    ctx: &mut RenderContext,
-    resources: &mut Resources,
-    text: &RText,
-    parent: Affine,
-) -> Result<(), String> {
-    if text.content.is_empty() {
-        return Ok(());
-    }
+/// The parley layout `draw_text` draws with — wrap at the frame width,
+/// explicit newlines honored, aligned per style. Shared with the
+/// layout-size measure (`text_layout_height`) so the two can never
+/// drift. Errors mirror the render-time font contract.
+fn build_text_layout(text: &RText) -> Result<Layout<()>, String> {
     let style = &text.style;
     let Some(mut font_ctx) = fonts::context() else {
         return Err(format!(
@@ -315,8 +339,6 @@ fn draw_text(
     if font_ctx.collection.family_id(&style.family).is_none() {
         return Err(format!("font family not registered: \"{}\"", style.family));
     }
-
-    // Layout once per input set; everything after is per-glyph draw math.
     let mut layout_ctx: LayoutContext<()> = LayoutContext::new();
     let mut builder = layout_ctx.ranged_builder(&mut font_ctx, &text.content, 1.0, true);
     builder.push_default(StyleProperty::FontSize(style.size));
@@ -341,6 +363,74 @@ fn draw_text(
         },
         AlignmentOptions::default(),
     );
+    Ok(layout)
+}
+
+/// Laid-out block height of a text node in design units — the measure
+/// behind the grown-canvas query. `None` for empty content or an
+/// unregistered font (the measure is total: no growth, not an error).
+pub fn text_layout_height(text: &RText) -> Option<f64> {
+    if text.content.is_empty() {
+        return None;
+    }
+    build_text_layout(text).ok().map(|l| l.height() as f64)
+}
+
+/// Vertical extent `(top, bottom)` the scene's TEXT content needs, in
+/// design units — `(0, scene.height)` when everything fits. A text
+/// block taller than its frame grows the extent per the node's
+/// `valign` (top → down, center → both ways, bottom → up), matching
+/// where `draw_text` places overflowing lines. Frame-space only:
+/// node/animator transforms are NOT applied — this is the resting
+/// layout, not the choreography.
+pub fn grown_extents(scene: &Scene) -> (f64, f64) {
+    fn walk(node: &RNode, top: &mut f64, bottom: &mut f64) {
+        match node {
+            RNode::Group(group) => {
+                for child in &group.children {
+                    walk(child, top, bottom);
+                }
+            }
+            RNode::Text(text) => {
+                let Some(height) = text_layout_height(text) else {
+                    return;
+                };
+                let frame = text.frame;
+                if height <= frame.height() {
+                    return;
+                }
+                let (node_top, node_bottom) = match text.style.valign {
+                    VAlign::Top => (frame.y0, frame.y0 + height),
+                    VAlign::Center => {
+                        let center = (frame.y0 + frame.y1) * 0.5;
+                        (center - height * 0.5, center + height * 0.5)
+                    }
+                    VAlign::Bottom => (frame.y1 - height, frame.y1),
+                };
+                *top = top.min(node_top);
+                *bottom = bottom.max(node_bottom);
+            }
+            RNode::Shape(_) | RNode::Image(_) => {}
+        }
+    }
+    let mut top = 0.0;
+    let mut bottom = scene.height;
+    walk(&scene.root, &mut top, &mut bottom);
+    (top, bottom)
+}
+
+fn draw_text(
+    ctx: &mut RenderContext,
+    resources: &mut Resources,
+    text: &RText,
+    parent: Affine,
+) -> Result<(), String> {
+    if text.content.is_empty() {
+        return Ok(());
+    }
+    let style = &text.style;
+    // Layout once per input set; everything after is per-glyph draw math.
+    let layout = build_text_layout(text)?;
 
     let valign_dy = match style.valign {
         VAlign::Top => 0.0,
@@ -364,6 +454,10 @@ fn draw_text(
         let line_top = (metrics.baseline - metrics.ascent) as f64;
         let line_bottom = (metrics.baseline + metrics.descent) as f64;
         let mut line_box: Option<Rect> = None;
+        // A line boundary always ends a word — an explicit "\n" carries no
+        // space cluster, and a word bleeding across lines would drag hulls,
+        // pills and word-animators out to the block extents.
+        previous_was_space = true;
 
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
@@ -472,7 +566,8 @@ fn draw_text(
     let mut glyph_opacity: Vec<f64> = vec![1.0; glyphs.len()];
     let mut pill_colors: Vec<Color> =
         vec![style.pill.as_ref().map_or(style.fill, |p| p.color); word_count];
-    let mut pill_opacity: Vec<f64> = vec![1.0; word_count];
+    let mut pill_opacity: Vec<f64> =
+        vec![style.pill.as_ref().map_or(1.0, |p| p.opacity); word_count];
 
     for animator in &text.unit_animators {
         let n = unit_count(animator.level);
@@ -571,6 +666,60 @@ fn draw_text(
     // --- draw: pills → shadow → fills → strokes ---------------------------------
 
     ctx.set_transform(full);
+
+    if let Some(backdrop) = &style.backdrop {
+        // One hull per line (a line's words are horizontally contiguous),
+        // then every hull joins ONE path filled ONCE — a translucent
+        // backdrop can't double-blend anywhere (line junctions included)
+        // by construction. The strip follows its LINE's transform only —
+        // per-word motion plays above a steady backdrop.
+        let mut hulls: Vec<Option<Rect>> = vec![None; line_boxes.len()];
+        for record in glyphs.iter() {
+            let Some(word) = record.word else { continue };
+            if !word_seen[word] {
+                continue;
+            }
+            let hull = &mut hulls[record.line];
+            *hull = Some(match hull {
+                Some(rect) => rect.union(word_boxes[word]),
+                None => word_boxes[word],
+            });
+        }
+        // Axis-preserving line transforms (translate/scale — every caption
+        // template) bake into the hull rects so the smooth bubble follows
+        // line motion; a ROTATED line degrades to its own rounded-rect
+        // subpath in the same single-fill path — the silhouette simplifies
+        // for that frame, the alpha stays single either way.
+        let axis_aligned = transforms[2].iter().all(|t| t.rotate == 0.0);
+        let path = if axis_aligned {
+            let rects: Vec<Rect> = hulls
+                .iter()
+                .enumerate()
+                .filter_map(|(line, hull)| {
+                    hull.map(|rect| {
+                        let affine =
+                            transforms[2][line].affine_about(line_boxes[line].center());
+                        affine
+                            .transform_rect_bbox(rect.inflate(backdrop.padding_x, backdrop.padding_y))
+                    })
+                })
+                .collect();
+            bubble::backdrop_path(&rects, backdrop.radius)
+        } else {
+            let mut path = BezPath::new();
+            for (line, hull) in hulls.iter().enumerate() {
+                let Some(rect) = hull else { continue };
+                let padded = rect.inflate(backdrop.padding_x, backdrop.padding_y);
+                let mut sub = RoundedRect::from_rect(padded, backdrop.radius).to_path(0.1);
+                sub.apply_affine(transforms[2][line].affine_about(line_boxes[line].center()));
+                path.extend(sub);
+            }
+            path
+        };
+        ctx.set_transform(full);
+        ctx.set_paint(backdrop.color);
+        ctx.fill_path(&path);
+    }
 
     if let Some(pill) = &style.pill {
         for (word, word_box) in word_boxes.iter().enumerate() {
@@ -718,4 +867,31 @@ fn draw_glyph(
         Some(()) => builder.stroke_glyphs(glyph),
         None => builder.fill_glyphs(glyph),
     }
+}
+
+/// Bounding box of pixels whose alpha exceeds `threshold`, in pixel coords
+/// `(min_x, min_y, max_x, max_y)`. `None` for a fully-blank buffer. The ONE
+/// definition of "ink" shared by every consumer (selection boxes, sticker
+/// normalization, preview blank-frame trimming) — hosts must not grow their
+/// own drifting scans.
+pub fn ink_bounds_rgba(rgba: &[u8], width: u32, height: u32, threshold: u8) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = (width as usize, height as usize);
+    if rgba.len() < w * h * 4 {
+        return None;
+    }
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (usize::MAX, usize::MAX, 0usize, 0usize);
+    let mut found = false;
+    for y in 0..h {
+        let row = y * w * 4;
+        for x in 0..w {
+            if rgba[row + x * 4 + 3] > threshold {
+                found = true;
+                if x < min_x { min_x = x; }
+                if x > max_x { max_x = x; }
+                if y < min_y { min_y = y; }
+                if y > max_y { max_y = y; }
+            }
+        }
+    }
+    found.then(|| (min_x as u32, min_y as u32, max_x as u32, max_y as u32))
 }

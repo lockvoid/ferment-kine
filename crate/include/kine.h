@@ -34,6 +34,12 @@ typedef struct {
   size_t len;
 } kine_buf;
 
+/* Register a host log sink. Every failure recorded in kine_last_error and
+ * every font registration is reported through it — levels: 0 info, 1 warn,
+ * 2 error. May fire on ANY thread; the message pointer is valid only for the
+ * duration of the call. NULL unregisters. */
+void kine_set_log_callback(void (*callback)(int32_t level, const char *message));
+
 /* Register a font (TTF/OTF) into the bundled-only collection.
  * Returns 0 on success, -1 on error (see kine_last_error). Idempotent. */
 int32_t kine_register_font(const uint8_t *bytes, size_t len);
@@ -78,6 +84,37 @@ kine_buf kine_document_probe(int64_t handle);
 kine_buf kine_document_render_rgba(int64_t handle, double t,
                                    const char *signals_json, uint32_t width,
                                    uint32_t height);
+
+/* The grown canvas the document's TEXT content needs with these signals —
+ * JSON {"width","height","y"} in design units (width = doc width, height >=
+ * doc height, y <= 0 = grown top in doc coords). Doc-sized at y 0 =
+ * everything fits. The one definition of text overflow; pair with
+ * kine_document_render_rgba_viewport to render without cropping. */
+kine_buf kine_document_layout_size(int64_t handle, const char *signals_json);
+
+/* kine_document_render_rgba over a vertical design-space viewport
+ * (view_y, view_h) — pass layout_size's y/height with a matching-aspect
+ * target; (0, doc height) is exactly the plain render. */
+kine_buf kine_document_render_rgba_viewport(int64_t handle, double t,
+                                            const char *signals_json,
+                                            uint32_t width, uint32_t height,
+                                            double view_y, double view_h);
+
+/* Union INK rect across `samples` frames over [0, span] seconds at a probe
+ * raster — JSON {"x","y","width","height","canvasWidth","canvasHeight",
+ * "canvasY"}: x/y/width/height are fractions of the GROWN canvas
+ * (canvasWidth × canvasHeight px), canvasY is the grown canvas's offset from
+ * the design box in design-height fractions; empty buffer = fully blank.
+ * The one definition of visual bounds for all hosts. */
+kine_buf kine_document_ink_union(int64_t handle, const char *signals_json,
+                                 uint32_t samples, double span, uint32_t width,
+                                 uint32_t height);
+
+/* One-shot ink union for hosts without the handle lifecycle (Ruby gem's
+ * registration-time probes) — compiles per call. */
+kine_buf kine_ink_union(const char *doc_json, const char *signals_json,
+                        uint32_t samples, double span, uint32_t width,
+                        uint32_t height);
 
 /* Free a document handle. Idempotent; a use-after-free reports an error. */
 void kine_document_free(int64_t handle);

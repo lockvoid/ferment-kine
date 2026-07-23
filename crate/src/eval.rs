@@ -107,6 +107,7 @@ pub struct RTextStyle {
     pub stroke: Option<(Color, f64)>,
     pub shadow: Option<RShadow>,
     pub pill: Option<RPill>,
+    pub backdrop: Option<RBackdrop>,
 }
 
 pub struct RShadow {
@@ -117,6 +118,14 @@ pub struct RShadow {
 }
 
 pub struct RPill {
+    pub color: Color,
+    pub radius: f64,
+    pub padding_x: f64,
+    pub padding_y: f64,
+    pub opacity: f64,
+}
+
+pub struct RBackdrop {
     pub color: Color,
     pub radius: f64,
     pub padding_x: f64,
@@ -955,6 +964,13 @@ fn resolve_node(ctx: &Ctx, node: &Node) -> Result<(RNode, Rect), SchemaError> {
                     radius: ctx.opt_num(&p.radius, 0.0),
                     padding_x: ctx.opt_num(&p.padding_x, 0.0),
                     padding_y: ctx.opt_num(&p.padding_y, 0.0),
+                    opacity: ctx.opt_num(&p.opacity, 1.0),
+                }),
+                backdrop: style.backdrop.as_ref().map(|b| RBackdrop {
+                    color: ctx.color(&b.color),
+                    radius: ctx.opt_num(&b.radius, 0.0),
+                    padding_x: ctx.opt_num(&b.padding_x, 0.0),
+                    padding_y: ctx.opt_num(&b.padding_y, 0.0),
                 }),
             };
 

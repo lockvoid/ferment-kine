@@ -11,7 +11,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use crate::validate::Compiled;
-use crate::{error, fonts, handle, render};
+use crate::{error, fonts, handle, log, render};
 
 enum Encoding {
     Png,
@@ -42,6 +42,15 @@ impl kine_buf {
         std::mem::forget(boxed);
         kine_buf { ptr, len }
     }
+}
+
+/// Register a host log sink. Every FFI failure (`kine_last_error` content) and
+/// font registration is reported through it — levels: 0 info, 1 warn, 2 error.
+/// The callback may fire on ANY thread; the message pointer is valid only for
+/// the duration of the call. NULL unregisters.
+#[no_mangle]
+pub extern "C" fn kine_set_log_callback(callback: Option<extern "C" fn(i32, *const c_char)>) {
+    log::set_callback(callback);
 }
 
 /// Register a font from raw bytes (TTF/OTF). Returns 0 on success, -1 on error
@@ -168,6 +177,165 @@ pub extern "C" fn kine_document_render_rgba(
         let compiled = document(handle)?;
         render_scene(&compiled, t, signals_json, width, height, Encoding::Rgba)
     })
+}
+
+/// The GROWN canvas the document's text content needs with these signals,
+/// as JSON `{"width","height","y"}` in DESIGN units: `width` is always the
+/// doc width (lines wrap), `height ≥` the doc height, and `y ≤ 0` is the
+/// grown canvas's top in doc coordinates (negative when a center/bottom
+/// valigned block grows upward). `{doc width, doc height, 0}` = everything
+/// fits. THE definition of text overflow — hosts size render targets and
+/// selection boxes from this instead of guessing at font metrics, and pair
+/// it with `kine_document_render_rgba_viewport` to render without cropping.
+/// Resting layout only: animator transforms don't move the measure.
+#[no_mangle]
+pub extern "C" fn kine_document_layout_size(handle: i64, signals_json: *const c_char) -> kine_buf {
+    guard(move || {
+        let compiled = document(handle)?;
+        let signals = if signals_json.is_null() {
+            serde_json::Value::Null
+        } else {
+            parse_json(cstr(signals_json, "signals")?, "signals")?
+        };
+        let scene = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, 0.0)
+            .map_err(|e| e.to_string())?;
+        let (top, bottom) = render::grown_extents(&scene);
+        Ok(format!(
+            r#"{{"width":{},"height":{},"y":{}}}"#,
+            scene.width,
+            bottom - top,
+            top
+        )
+        .into_bytes())
+    })
+}
+
+/// `kine_document_render_rgba` over a vertical design-space viewport
+/// `(view_y, view_h)` — pass `kine_document_layout_size`'s `y`/`height`
+/// (with a target raster of matching aspect) to render text that
+/// overflows the doc canvas instead of cropping it. `(0, doc height)`
+/// is exactly the plain render.
+#[no_mangle]
+pub extern "C" fn kine_document_render_rgba_viewport(
+    handle: i64,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+    view_y: f64,
+    view_h: f64,
+) -> kine_buf {
+    guard(move || {
+        let compiled = document(handle)?;
+        let signals = if signals_json.is_null() {
+            serde_json::Value::Null
+        } else {
+            parse_json(cstr(signals_json, "signals")?, "signals")?
+        };
+        let scene = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, t)
+            .map_err(|e| e.to_string())?;
+        render::render_rgba_viewport(&scene, width, height, view_y, view_h)
+    })
+}
+
+/// Union INK rect across `samples` frames evenly spaced over `[0, span]`
+/// seconds, rendered at a small probe raster — returned as JSON
+/// `{"x","y","width","height"}` in DESIGN-BOX FRACTIONS. `samples <= 1` (or
+/// `span <= 0`) probes the resting frame only. An empty buffer (len 0) means
+/// a fully-blank document. This is THE definition of visual bounds — hosts
+/// (selection borders, sticker normalization, preview blank-trimming) consume
+/// it instead of growing their own alpha scans.
+#[no_mangle]
+pub extern "C" fn kine_document_ink_union(
+    handle: i64,
+    signals_json: *const c_char,
+    samples: u32,
+    span: f64,
+    width: u32,
+    height: u32,
+) -> kine_buf {
+    guard(move || {
+        let compiled = document(handle)?;
+        ink_union_impl(&compiled, signals_json, samples, span, width, height)
+    })
+}
+
+/// One-shot variant for hosts without the handle lifecycle (the Ruby gem's
+/// registration-time probes) — compiles per call.
+#[no_mangle]
+pub extern "C" fn kine_ink_union(
+    doc_json: *const c_char,
+    signals_json: *const c_char,
+    samples: u32,
+    span: f64,
+    width: u32,
+    height: u32,
+) -> kine_buf {
+    guard(move || {
+        let compiled = compile(cstr(doc_json, "document")?)?;
+        ink_union_impl(&compiled, signals_json, samples, span, width, height)
+    })
+}
+
+fn ink_union_impl(
+    compiled: &Compiled,
+    signals_json: *const c_char,
+    samples: u32,
+    span: f64,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    {
+        let signals = if signals_json.is_null() {
+            serde_json::Value::Null
+        } else {
+            parse_json(cstr(signals_json, "signals")?, "signals")?
+        };
+        if width == 0 || height == 0 {
+            return Err("probe size must be positive".into());
+        }
+        // Text overflow: probe over the GROWN canvas (layout_size's answer),
+        // so ink that grows past the design box is measured, not cropped.
+        // Fractions are relative to the grown box — identical to the design
+        // box whenever everything fits (stickers, fitting text) — and the
+        // grown box itself rides the payload so consumers can map through
+        // the same canvas the pixels render on. Growth is measured on the
+        // resting layout (t = 0): text layout is signal-driven, not
+        // time-driven, so every sample shares it.
+        let rest = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, 0.0)
+            .map_err(|e| e.to_string())?;
+        let (view_top, view_bottom) = render::grown_extents(&rest);
+        let view_h = view_bottom - view_top;
+        let count = if samples <= 1 || span <= 0.0 { 1 } else { samples };
+        let mut union: Option<(u32, u32, u32, u32)> = None;
+        for i in 0..count {
+            let t = if count == 1 { 0.0 } else { span * (i as f64) / ((count - 1) as f64) };
+            let scene = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, t)
+                .map_err(|e| e.to_string())?;
+            let rgba = render::render_rgba_viewport(&scene, width, height, view_top, view_h)?;
+            if let Some(b) = render::ink_bounds_rgba(&rgba, width, height, 8) {
+                union = Some(match union {
+                    None => b,
+                    Some(u) => (u.0.min(b.0), u.1.min(b.1), u.2.max(b.2), u.3.max(b.3)),
+                });
+            }
+        }
+        let Some((min_x, min_y, max_x, max_y)) = union else {
+            return Ok(Vec::new());
+        };
+        let (w, h) = (width as f64, height as f64);
+        Ok(format!(
+            "{{\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"canvasWidth\":{},\"canvasHeight\":{},\"canvasY\":{}}}",
+            min_x as f64 / w,
+            min_y as f64 / h,
+            (max_x - min_x + 1) as f64 / w,
+            (max_y - min_y + 1) as f64 / h,
+            rest.width,
+            view_h,
+            view_top
+        )
+        .into_bytes())
+    }
 }
 
 /// Free a document handle. Idempotent; a use-after-free reports an error on the

@@ -23,9 +23,16 @@ for target in "${TARGETS[@]}"; do
 done
 
 rm -rf "$OUT" "$STAGE"
-mkdir -p "$STAGE/Headers"
-cp "$CRATE/include/kine.h" "$STAGE/Headers/"
-cat > "$STAGE/Headers/module.modulemap" <<'EOF'
+# Namespace the header + modulemap under a `KineCore/` subdir. Two static-library
+# xcframeworks whose modulemaps both sit at the Headers root collide when linked
+# side-by-side (Xcode copies each `Headers/module.modulemap` to the shared
+# `$BUILT_PRODUCTS_DIR/include/module.modulemap` — "Multiple commands produce").
+# The subdir makes it `include/KineCore/module.modulemap`, so Kine coexists
+# with any other static-library xcframework a host links. `import KineCore`
+# still resolves (`header "kine.h"` is relative to the modulemap).
+mkdir -p "$STAGE/Headers/KineCore"
+cp "$CRATE/include/kine.h" "$STAGE/Headers/KineCore/"
+cat > "$STAGE/Headers/KineCore/module.modulemap" <<'EOF'
 module KineCore {
     header "kine.h"
     export *

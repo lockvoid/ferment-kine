@@ -5,6 +5,15 @@ import KineCore
     import CoreGraphics
 #endif
 
+/// The installed sink, read by the C trampoline. Written once at startup
+/// (`Kine.setLogSink`) before any render — no lock by contract.
+private nonisolated(unsafe) var kineLogSink: (@Sendable (Kine.LogLevel, String) -> Void)?
+
+private func kineLogTrampoline(level: Int32, message: UnsafePointer<CChar>?) {
+    guard let message, let sink = kineLogSink else { return }
+    sink(Kine.LogLevel(rawValue: level) ?? .error, String(cString: message))
+}
+
 /// Thin Swift wrapper over the kine C ABI (KineCore / kine.h). Deliberately no
 /// schema modeling in Swift — documents are authored as JSON and validated by
 /// the core.
@@ -23,6 +32,22 @@ public enum Kine {
             }
             return .failed(fallback)
         }
+    }
+
+    public enum LogLevel: Int32, Sendable {
+        case info = 0
+        case warn = 1
+        case error = 2
+    }
+
+    /// Install the process-wide log sink. The core reports every failure
+    /// (the `kine_last_error` content) and every font registration through
+    /// it — nothing in kine is allowed to fail silently once a sink is set.
+    /// Install ONCE at startup, before any render; the callback fires on
+    /// whatever thread the failing call runs on.
+    public static func setLogSink(_ sink: @escaping @Sendable (LogLevel, String) -> Void) {
+        kineLogSink = sink
+        kine_set_log_callback(kineLogTrampoline)
     }
 
     /// Register a font (TTF/OTF) into the process-global, bundled-only
@@ -49,10 +74,36 @@ public enum Kine {
             public let type: String
         }
 
+        /// One embedded raster asset from the document manifest (§4). `kind` is
+        /// currently always "image"; `mime` is the container form
+        /// ("image/png"|"image/jpeg"|"image/webp"|"image/gif"|"image/apng");
+        /// `animated` is true when the decoded asset has more than one frame.
+        public struct Asset: Decodable, Sendable {
+            public let key: String
+            public let kind: String
+            public let mime: String
+            public let animated: Bool
+        }
+
         public let version: Int
         public let size: Size
         public let inputs: [Input]
         public let roles: [String]
+        public let assets: [Asset]
+
+        private enum CodingKeys: String, CodingKey {
+            case version, size, inputs, roles, assets
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            version = try container.decode(Int.self, forKey: .version)
+            size = try container.decode(Size.self, forKey: .size)
+            inputs = try container.decode([Input].self, forKey: .inputs)
+            roles = try container.decode([String].self, forKey: .roles)
+            // Optional-safe: docs probed by an older core (pre-manifest) omit it.
+            assets = try container.decodeIfPresent([Asset].self, forKey: .assets) ?? []
+        }
     }
 
     /// One rendered frame: RGBA8, premultiplied alpha, sRGB, row-major.
@@ -78,8 +129,11 @@ public enum Kine {
     }
 
     /// A parsed, validated document. Renders every frame without re-parsing;
-    /// the underlying handle is freed on `deinit`.
-    public final class Document {
+    /// the underlying handle is freed on `deinit`. `@unchecked Sendable`: the
+    /// handle is immutable after `init` and the core is internally thread-safe
+    /// (concurrent renders, RwLock-guarded font registry) — so the wrapper
+    /// carries no additional shared mutable state.
+    public final class Document: @unchecked Sendable {
         private let handle: Int64
 
         public init(json: String) throws {
@@ -97,6 +151,58 @@ public enum Kine {
 
         /// Render at time `t` with `signals` (JSON-encodable). `t` is sugar for
         /// the document's `time` input; an explicit `time` signal wins.
+        /// Union ink rect across `samples` frames over `[0, span]` seconds at a
+        /// small probe raster — design-box fractions. `nil` = fully blank.
+        /// The crate's one definition of visual bounds (selection borders,
+        /// sticker normalization, preview trimming all read THIS).
+        public func inkUnion(
+            signals: [String: Any] = [:], samples: Int = 1, span: Double = 0,
+            probeWidth: Int = 160, probeHeight: Int = 160
+        ) throws -> CGRect? {
+            try inkUnionInCanvas(
+                signals: signals, samples: samples, span: span,
+                probeWidth: probeWidth, probeHeight: probeHeight
+            )?.ink
+        }
+
+        /// Ink probe payload: `ink` in fractions of the PROBE CANVAS, and
+        /// the probe canvas itself in design units — the doc box when
+        /// everything fits, the GROWN box (`layoutSize`) when text
+        /// overflows. Map on-screen boxes through `canvas`, never the raw
+        /// doc size: the pixels render on the same grown canvas.
+        public struct InkUnion {
+            public let ink: CGRect
+            /// Design-unit canvas the fractions speak: `origin.y ≤ 0` when
+            /// the box grew upward; equals `(0, 0, docW, docH)` unfitted.
+            public let canvas: CGRect
+        }
+
+        public func inkUnionInCanvas(
+            signals: [String: Any] = [:], samples: Int = 1, span: Double = 0,
+            probeWidth: Int = 160, probeHeight: Int = 160
+        ) throws -> InkUnion? {
+            let json = try signalsJSON(signals)
+            let buffer = json.withCString {
+                kine_document_ink_union(
+                    handle, $0, UInt32(max(1, samples)), span,
+                    UInt32(probeWidth), UInt32(probeHeight)
+                )
+            }
+            let data = try consume(buffer, "ink probe")
+            guard !data.isEmpty,
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Double],
+                  let x = object["x"], let y = object["y"],
+                  let width = object["width"], let height = object["height"],
+                  let canvasWidth = object["canvasWidth"],
+                  let canvasHeight = object["canvasHeight"],
+                  let canvasY = object["canvasY"]
+            else { return nil }
+            return InkUnion(
+                ink: CGRect(x: x, y: y, width: width, height: height),
+                canvas: CGRect(x: 0, y: canvasY, width: canvasWidth, height: canvasHeight)
+            )
+        }
+
         public func renderRGBA(
             t: Double, signals: [String: Any] = [:], width: Int, height: Int
         ) throws -> RenderedFrame {
@@ -105,6 +211,41 @@ public enum Kine {
                 kine_document_render_rgba(handle, t, $0, UInt32(width), UInt32(height))
             }
             let data = try consume(buffer, "render")
+            return RenderedFrame(data: data, width: width, height: height)
+        }
+
+        /// The grown canvas the document's TEXT content needs with these
+        /// signals, in design units: `width` = doc width (lines wrap),
+        /// `height ≥` doc height, and `y ≤ 0` = the grown canvas's top in
+        /// doc coordinates. Doc-sized rect at y 0 = everything fits. The
+        /// crate's one definition of text overflow — size render targets
+        /// and selection boxes from THIS, then render through
+        /// `renderRGBAViewport(y:, height:)`.
+        public func layoutSize(signals: [String: Any] = [:]) throws -> CGRect {
+            let json = try signalsJSON(signals)
+            let buffer = json.withCString { kine_document_layout_size(handle, $0) }
+            let data = try consume(buffer, "layout size")
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Double],
+                  let width = object["width"], let height = object["height"], let y = object["y"]
+            else { throw KineError.current("layout size decode failed") }
+            return CGRect(x: 0, y: y, width: width, height: height)
+        }
+
+        /// `renderRGBA` over a vertical design-space viewport — pass
+        /// `layoutSize()`'s `origin.y`/`height` (with a matching-aspect
+        /// target) to render text that overflows the doc canvas instead of
+        /// cropping it.
+        public func renderRGBAViewport(
+            t: Double, signals: [String: Any] = [:], width: Int, height: Int,
+            viewY: Double, viewHeight: Double
+        ) throws -> RenderedFrame {
+            let json = try signalsJSON(signals)
+            let buffer = json.withCString {
+                kine_document_render_rgba_viewport(
+                    handle, t, $0, UInt32(width), UInt32(height), viewY, viewHeight
+                )
+            }
+            let data = try consume(buffer, "viewport render")
             return RenderedFrame(data: data, width: width, height: height)
         }
     }

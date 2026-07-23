@@ -15,6 +15,10 @@ pub fn clear() {
 
 pub fn set(message: impl Into<String>) {
     let text = message.into();
+    // Every FFI failure funnels through here — the one choke point where the
+    // host's log sink hears it too, even when the caller never reads
+    // `kine_last_error`.
+    crate::log::emit(crate::log::ERROR, &text);
     // A NUL in the message would truncate it; replace so the caller still gets
     // something legible rather than a silently empty string.
     let cstring = CString::new(text)

@@ -380,6 +380,34 @@ fn check_node(
                     &format!("{style_path}.pill.paddingY"),
                     inputs,
                 )?;
+                check_opt_binding_number(
+                    &pill.opacity,
+                    &format!("{style_path}.pill.opacity"),
+                    inputs,
+                )?;
+            }
+            if let Some(backdrop) = &style.backdrop {
+                check_color_value(
+                    &backdrop.color,
+                    &format!("{style_path}.backdrop.color"),
+                    inputs,
+                    colors,
+                )?;
+                check_opt_binding_number(
+                    &backdrop.radius,
+                    &format!("{style_path}.backdrop.radius"),
+                    inputs,
+                )?;
+                check_opt_binding_number(
+                    &backdrop.padding_x,
+                    &format!("{style_path}.backdrop.paddingX"),
+                    inputs,
+                )?;
+                check_opt_binding_number(
+                    &backdrop.padding_y,
+                    &format!("{style_path}.backdrop.paddingY"),
+                    inputs,
+                )?;
             }
         }
     }

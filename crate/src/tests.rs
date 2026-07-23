@@ -10,7 +10,7 @@ use crate::schema::{Composite, StaggerFrom};
 use crate::{
     kine_buf, kine_buf_free, kine_document_create, kine_document_free, kine_document_probe,
     kine_document_render_rgba, kine_last_error, kine_probe, kine_register_font,
-    kine_render_document, kine_render_document_rgba, kine_version,
+    kine_render_document, kine_render_document_rgba, kine_set_log_callback, kine_version,
 };
 
 const FONT: &[u8] = include_bytes!("../testdata/font.ttf");
@@ -301,6 +301,243 @@ fn probe_accepts_the_minimal_document() {
 
 // --- rendering ----------------------------------------------------------------------
 
+/// Two words on one line with a translucent BACKDROP and a zero-base-opacity
+/// pill: the backdrop is one hull per line, so its alpha must be UNIFORM
+/// across the inter-word gap (per-word pills would seam or double-blend
+/// there), and the pill must stay hidden until an animator raises it.
+#[test]
+fn backdrop_is_one_uniform_strip_and_zero_opacity_pill_hides() {
+    register_font();
+    let doc = r##"{
+      "version": 1,
+      "size": { "width": 400, "height": 120 },
+      "inputs": [{ "key": "text", "type": "string", "default": "AB CD" }],
+      "colors": [],
+      "assets": [],
+      "root": {
+        "kind": "text", "key": "line", "content": { "input": "text" },
+        "frame": { "x": 20, "y": 10, "width": 360, "height": 100 },
+        "style": {
+          "fontFamily": "Bebas Neue", "size": 60, "align": "center", "valign": "center",
+          "fill": "#FFFFFFFF",
+          "backdrop": { "color": "#20A0FF80", "radius": 10, "paddingX": 14, "paddingY": 8 },
+          "pill": { "color": "#FF0000FF", "radius": 6, "paddingX": 4, "paddingY": 2, "opacity": 0 }
+        }
+      },
+      "animators": []
+    }"##;
+    let png = take(render(doc, 0.0, "{}", 400, 120))
+        .unwrap_or_else(|| panic!("render failed: {}", last_error()));
+    let decoder = png::Decoder::new(std::io::Cursor::new(png.as_slice()));
+    let mut reader = decoder.read_info().expect("decode");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("size")];
+    let frame = reader.next_frame(&mut buf).expect("frame");
+    let pixels = &buf[..frame.buffer_size()];
+    let px = |x: usize, y: usize| {
+        let i = (y * 400 + x) * 4;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    };
+
+    // Sample a horizontal run across the strip's vertical center, keeping only
+    // GLYPH-FREE backdrop pixels (pure backdrop color, no white ink blended
+    // in). The gap between "AB" and "CD" sits among them; every such pixel
+    // must carry the identical color+alpha — one path, one fill, no seams.
+    let y = 60;
+    let backdrop_only: Vec<[u8; 4]> = (140..260)
+        .map(|x| px(x, y))
+        .filter(|p| p[3] > 0 && p[0] <= 40)
+        .collect();
+    assert!(
+        backdrop_only.len() > 20,
+        "expected a run of pure-backdrop pixels through the gap, got {}",
+        backdrop_only.len()
+    );
+    let first = backdrop_only[0];
+    assert!(
+        backdrop_only.iter().all(|p| *p == first),
+        "backdrop must be uniform across the inter-word gap: {:?}",
+        backdrop_only
+    );
+
+    // Red would leak in if the zero-opacity pill drew (its padding sticks out
+    // past the glyphs); no pixel anywhere may be red-dominant.
+    let red_leak = pixels
+        .chunks_exact(4)
+        .any(|p| p[3] > 0 && p[0] > 0xB0 && p[1] < 0x40 && p[2] < 0x40);
+    assert!(!red_leak, "a pill with base opacity 0 must not draw");
+}
+
+/// Decode a rendered PNG and collect every PURE-backdrop pixel's alpha for
+/// the `#20A0FF` hue (glyph-blended pixels drift red/green out of the
+/// window; AA edge pixels keep the hue but only LOWER the alpha — straight
+/// alpha scales with coverage). The invariant callers assert: with one
+/// path + one fill, NO backdrop pixel can ever exceed the paint's own
+/// alpha — a double-blend (two overlapping translucent fills) composites
+/// to 1−(1−a)² and jumps 0x80 → ~0xBF.
+fn backdrop_alphas(png: &[u8], width: usize) -> Vec<u8> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png));
+    let mut reader = decoder.read_info().expect("decode");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("size")];
+    let frame = reader.next_frame(&mut buf).expect("frame");
+    let _ = width;
+    buf[..frame.buffer_size()]
+        .chunks_exact(4)
+        .filter(|p| {
+            p[3] > 0 && (0x18..=0x30).contains(&p[0]) && (0x88..=0xB8).contains(&p[1]) && p[2] >= 0xE8
+        })
+        .map(|p| p[3])
+        .collect()
+}
+
+/// Two LINES with a translucent backdrop: the per-line padded hulls overlap
+/// vertically at the junction, and the backdrop must still read as ONE slab
+/// — a single path, a single fill, so the intersection carries exactly the
+/// paint's alpha (per-line fills double-blend it to ~0xBF).
+#[test]
+fn multiline_backdrop_is_one_uniform_slab_across_the_line_junction() {
+    register_font();
+    let doc = r##"{
+      "version": 1,
+      "size": { "width": 400, "height": 260 },
+      "inputs": [{ "key": "text", "type": "string", "default": "AB\nAB" }],
+      "colors": [],
+      "assets": [],
+      "root": {
+        "kind": "text", "key": "t", "content": { "input": "text" },
+        "frame": { "x": 20, "y": 10, "width": 360, "height": 240 },
+        "style": {
+          "fontFamily": "Bebas Neue", "size": 60, "align": "center", "valign": "center",
+          "fill": "#FFFFFFFF",
+          "backdrop": { "color": "#20A0FF80", "radius": 10, "paddingX": 14, "paddingY": 12 }
+        }
+      },
+      "animators": []
+    }"##;
+    let png = take(render(doc, 0.0, "{}", 400, 260))
+        .unwrap_or_else(|| panic!("render failed: {}", last_error()));
+    let alphas = backdrop_alphas(&png, 400);
+    assert!(
+        alphas.iter().filter(|a| **a >= 0x70).count() > 200,
+        "expected a solid backdrop slab, got {} interior pixels",
+        alphas.iter().filter(|a| **a >= 0x70).count()
+    );
+    let max = alphas.iter().max().copied().unwrap_or(0);
+    assert!(
+        max <= 0x88,
+        "backdrop must never exceed its paint alpha (single fill): max {max:#04x} — \
+         a value near 0xBF is two per-line fills double-blending at the junction"
+    );
+}
+
+/// An EXPLICIT newline has no space before the break — word segmentation
+/// must still end the word at the line boundary, or the merged cross-line
+/// "word" box drags every line's hull out to the block extents (and would
+/// give pills/word-animators a two-line word). A wide line over a narrow
+/// line must produce a visibly narrower backdrop on the narrow line.
+#[test]
+fn explicit_newlines_break_words_so_each_line_hugs_its_own_hull() {
+    register_font();
+    let doc = r##"{
+      "version": 1,
+      "size": { "width": 400, "height": 260 },
+      "inputs": [{ "key": "text", "type": "string", "default": "AAAAAAAA\nBB" }],
+      "colors": [],
+      "assets": [],
+      "root": {
+        "kind": "text", "key": "t", "content": { "input": "text" },
+        "frame": { "x": 20, "y": 10, "width": 360, "height": 240 },
+        "style": {
+          "fontFamily": "Bebas Neue", "size": 60, "align": "center", "valign": "center",
+          "fill": "#FFFFFFFF",
+          "backdrop": { "color": "#20A0FF80", "radius": 10, "paddingX": 14, "paddingY": 12 }
+        }
+      },
+      "animators": []
+    }"##;
+    let png = take(render(doc, 0.0, "{}", 400, 260))
+        .unwrap_or_else(|| panic!("render failed: {}", last_error()));
+    let decoder = png::Decoder::new(std::io::Cursor::new(png.as_slice()));
+    let mut reader = decoder.read_info().expect("decode");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("size")];
+    let frame = reader.next_frame(&mut buf).expect("frame");
+    let pixels = &buf[..frame.buffer_size()];
+    // Per-row rightmost backdrop-or-ink pixel → compare a row inside each
+    // line band (25% / 75% of the backdrop's vertical extent).
+    let mut rows: Vec<(usize, usize)> = Vec::new();
+    for y in 0..260usize {
+        let mut max_x = None;
+        for x in 0..400usize {
+            let i = (y * 400 + x) * 4;
+            if pixels[i + 3] > 0x40 {
+                max_x = Some(x);
+            }
+        }
+        if let Some(x) = max_x {
+            rows.push((y, x));
+        }
+    }
+    assert!(rows.len() > 100, "expected a two-line slab, got {} rows", rows.len());
+    let top_row = rows[rows.len() / 4];
+    let bottom_row = rows[rows.len() * 3 / 4];
+    assert!(
+        top_row.1 >= bottom_row.1 + 40,
+        "the narrow line must keep its own hull: wide row {:?} vs narrow row {:?} — \
+         equal extents mean a cross-line word merged the hulls",
+        top_row,
+        bottom_row
+    );
+}
+
+/// A line-level ROTATE animator gives every line its own non-axis-aligned
+/// transform — the smooth silhouette can't apply, but the fallback (each
+/// line's rounded hull as a subpath of the SAME single-fill path) keeps
+/// double-blending structurally impossible there too.
+#[test]
+fn rotated_lines_backdrop_still_never_double_blends() {
+    register_font();
+    let doc = r##"{
+      "version": 1,
+      "size": { "width": 400, "height": 260 },
+      "inputs": [
+        { "key": "text", "type": "string", "default": "AB\nAB" },
+        { "key": "progress", "type": "unit", "default": 1 }
+      ],
+      "colors": [],
+      "assets": [],
+      "root": {
+        "kind": "text", "key": "t", "content": { "input": "text" },
+        "frame": { "x": 20, "y": 10, "width": 360, "height": 240 },
+        "style": {
+          "fontFamily": "Bebas Neue", "size": 60, "align": "center", "valign": "center",
+          "fill": "#FFFFFFFF",
+          "backdrop": { "color": "#20A0FF80", "radius": 10, "paddingX": 14, "paddingY": 12 }
+        }
+      },
+      "animators": [
+        {
+          "target": "t.lines",
+          "property": "rotate",
+          "weight": { "stagger": { "driver": "progress", "total": 0.4, "from": "start" } },
+          "from": -6,
+          "to": 6
+        }
+      ]
+    }"##;
+    let png = take(render(doc, 0.0, r#"{"progress":1.0}"#, 400, 260))
+        .unwrap_or_else(|| panic!("render failed: {}", last_error()));
+    let alphas = backdrop_alphas(&png, 400);
+    assert!(
+        alphas.iter().filter(|a| **a >= 0x70).count() > 100,
+        "expected backdrop pixels under rotation, got {}",
+        alphas.iter().filter(|a| **a >= 0x70).count()
+    );
+    let max = alphas.iter().max().copied().unwrap_or(0);
+    assert!(
+        max <= 0x88,
+        "rotated per-line hulls must share ONE fill: max backdrop alpha {max:#04x}"
+    );
+}
+
 #[test]
 fn renders_the_test_card_document() {
     register_font();
@@ -403,6 +640,42 @@ fn empty_document_fails_validation_not_abort() {
         last_error().contains("missing field"),
         "got: {:?}",
         last_error()
+    );
+}
+
+// --- host log sink --------------------------------------------------------------
+
+static CAPTURED_LOGS: std::sync::Mutex<Vec<(i32, String)>> = std::sync::Mutex::new(Vec::new());
+
+extern "C" fn capture_log(level: i32, message: *const std::ffi::c_char) {
+    let text = unsafe { std::ffi::CStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
+    CAPTURED_LOGS.lock().unwrap().push((level, text));
+}
+
+#[test]
+fn log_sink_hears_font_registrations_and_errors() {
+    kine_set_log_callback(Some(capture_log));
+    register_font();
+    let doc = r##"{ "version": 1, "size": { "width": 64, "height": 64 },
+      "root": { "kind": "text", "key": "t", "content": "X",
+        "frame": { "x": 0, "y": 0, "width": 64, "height": 64 },
+        "style": { "fontFamily": "Nope Sans", "size": 20, "fill": "#FFFFFF" } } }"##;
+    let buf = render(doc, 0.0, "{}", 64, 64);
+    assert!(take(buf).is_none());
+    kine_set_log_callback(None);
+    let logs = CAPTURED_LOGS.lock().unwrap();
+    assert!(
+        logs.iter()
+            .any(|(level, text)| *level == 0 && text.contains("registered font family")),
+        "registration never reached the sink: {logs:?}"
+    );
+    assert!(
+        logs.iter().any(|(level, text)| {
+            *level == 2 && text.contains("not registered") && text.contains("Nope Sans")
+        }),
+        "family-miss error never reached the sink: {logs:?}"
     );
 }
 
@@ -1818,3 +2091,186 @@ fn decoded_animation_at_exactly_32mb_is_accepted() {
         last_error()
     );
 }
+
+#[test]
+fn ink_union_reports_content_rect_and_unions_across_motion() {
+    use std::ffi::CString;
+
+    // A 120×80 doc whose 40×20 rect slides x 20→60 over 1s: resting ink is the
+    // rect at x=20; the union across the sweep must extend to x=100.
+    let doc = r##"{ "version": 1, "size": { "width": 120, "height": 80 },
+      "inputs": [ { "key": "time", "type": "time", "default": 0 } ],
+      "root": { "kind": "shape", "key": "box",
+        "geometry": { "kind": "rect", "x": 20, "y": 30, "width": 40, "height": 20 },
+        "fill": { "kind": "solid", "color": "#FFFFFFFF" } },
+      "animators": [ { "target": "box", "property": "translateX", "driver": "time",
+                       "period": 1, "from": 0, "to": 40 } ] }"##;
+    let c_doc = CString::new(doc).unwrap();
+    let handle = crate::capi::kine_document_create(c_doc.as_ptr());
+    assert!(handle > 0, "{}", last_error());
+
+    // Resting probe: rect fractions of the design box.
+    let rest = take(crate::capi::kine_document_ink_union(handle, std::ptr::null(), 1, 0.0, 120, 80))
+        .expect("resting ink");
+    let rest: serde_json::Value = serde_json::from_slice(&rest).unwrap();
+    let close = |v: &serde_json::Value, key: &str, want: f64| {
+        let got = v[key].as_f64().unwrap();
+        assert!((got - want).abs() < 0.03, "{key}: got {got}, want {want}");
+    };
+    close(&rest, "x", 20.0 / 120.0);
+    close(&rest, "y", 30.0 / 80.0);
+    close(&rest, "width", 40.0 / 120.0);
+    close(&rest, "height", 20.0 / 80.0);
+
+    // Union across the sweep widens toward the full travel. Samples land at
+    // t = 0, .2, .4, .6, .8, 1.0 and the time driver wraps at its period
+    // (t = 1.0 ≡ 0), so the farthest sampled offset is 32px → right edge 92.
+    let union = take(crate::capi::kine_document_ink_union(handle, std::ptr::null(), 6, 1.0, 120, 80))
+        .expect("union ink");
+    let union: serde_json::Value = serde_json::from_slice(&union).unwrap();
+    close(&union, "x", 20.0 / 120.0);
+    close(&union, "width", 72.0 / 120.0);
+
+    crate::capi::kine_document_free(handle);
+}
+
+#[test]
+fn layout_size_reports_grown_canvas_for_overflowing_text() {
+    register_font();
+
+    // A 400×100 doc whose center-valigned text lays out FIVE 40pt lines
+    // (~240px with 1.2 line height) — far taller than the canvas. The
+    // layout-size query must report the grown canvas and the negative top
+    // origin (center growth = half up, half down); a single short line
+    // must report the doc size untouched.
+    let doc = r##"{ "version": 1, "size": { "width": 400, "height": 100 },
+      "inputs": [ { "key": "text", "type": "string", "default": "A" } ],
+      "root": { "kind": "text", "key": "line", "role": "text",
+        "content": { "input": "text" },
+        "frame": { "x": 0, "y": 0, "width": 400, "height": 100 },
+        "style": { "fontFamily": "Bebas Neue", "size": 40, "lineHeight": 1.2,
+                   "align": "center", "valign": "center", "fill": "#FFFFFF" } } }"##;
+    let c_doc = CString::new(doc).unwrap();
+    let handle = crate::capi::kine_document_create(c_doc.as_ptr());
+    assert!(handle > 0, "{}", last_error());
+
+    let short = CString::new(r#"{ "text": "One" }"#).unwrap();
+    let size = take(crate::capi::kine_document_layout_size(handle, short.as_ptr()))
+        .expect("layout size (short)");
+    let size: serde_json::Value = serde_json::from_slice(&size).unwrap();
+    assert_eq!(size["width"].as_f64().unwrap(), 400.0);
+    assert_eq!(size["height"].as_f64().unwrap(), 100.0, "fitting text must not grow the canvas");
+    assert_eq!(size["y"].as_f64().unwrap(), 0.0);
+
+    let tall = CString::new(r#"{ "text": "One\nTwo\nThree\nFour\nFive" }"#).unwrap();
+    let size = take(crate::capi::kine_document_layout_size(handle, tall.as_ptr()))
+        .expect("layout size (tall)");
+    let size: serde_json::Value = serde_json::from_slice(&size).unwrap();
+    let height = size["height"].as_f64().unwrap();
+    let y = size["y"].as_f64().unwrap();
+    assert_eq!(size["width"].as_f64().unwrap(), 400.0, "wrap means width never grows");
+    assert!(height > 200.0, "five 40pt lines must grow the canvas well past 100 (got {height})");
+    assert!(y < -40.0, "center valign grows half upward (got y {y})");
+    assert!(
+        (y.abs() * 2.0 + 100.0 - height).abs() < 1.0,
+        "center growth is symmetric around the design box (y {y}, height {height})"
+    );
+
+    crate::capi::kine_document_free(handle);
+}
+
+#[test]
+fn viewport_render_recovers_text_the_default_canvas_crops() {
+    register_font();
+
+    let doc = r##"{ "version": 1, "size": { "width": 400, "height": 100 },
+      "inputs": [ { "key": "text", "type": "string", "default": "A" } ],
+      "root": { "kind": "text", "key": "line", "role": "text",
+        "content": { "input": "text" },
+        "frame": { "x": 0, "y": 0, "width": 400, "height": 100 },
+        "style": { "fontFamily": "Bebas Neue", "size": 40, "lineHeight": 1.2,
+                   "align": "center", "valign": "center", "fill": "#FFFFFF" } } }"##;
+    let c_doc = CString::new(doc).unwrap();
+    let handle = crate::capi::kine_document_create(c_doc.as_ptr());
+    assert!(handle > 0, "{}", last_error());
+    let signals = CString::new(r#"{ "text": "One\nTwo\nThree\nFour\nFive" }"#).unwrap();
+
+    let alpha_in_band = |rgba: &[u8], width: usize, y0: usize, y1: usize| -> u32 {
+        let mut hits = 0u32;
+        for y in y0..y1 {
+            for x in 0..width {
+                if rgba[(y * width + x) * 4 + 3] > 8 {
+                    hits += 1;
+                }
+            }
+        }
+        hits
+    };
+
+    // Default canvas render: the block overflows and the FIRST line is lost —
+    // the top band of the 100-tall canvas holds glyph MIDDLES, but line one's
+    // ascenders above y=0 are gone. Prove the crop by total coverage instead:
+    // the default render must hold FEWER ink pixels than the grown viewport.
+    let plain = take(crate::capi::kine_document_render_rgba(
+        handle, 0.0, signals.as_ptr(), 400, 100,
+    ))
+    .expect("default render");
+    let plain_ink = alpha_in_band(&plain, 400, 0, 100);
+
+    // Grown viewport at the layout-size answer: every line inside the target.
+    let size = take(crate::capi::kine_document_layout_size(handle, signals.as_ptr()))
+        .expect("layout size");
+    let size: serde_json::Value = serde_json::from_slice(&size).unwrap();
+    let view_y = size["y"].as_f64().unwrap();
+    let view_h = size["height"].as_f64().unwrap();
+    let target_h = view_h.ceil() as u32;
+    let grown = take(crate::capi::kine_document_render_rgba_viewport(
+        handle, 0.0, signals.as_ptr(), 400, target_h, view_y, view_h,
+    ))
+    .expect("viewport render");
+    let grown_ink = alpha_in_band(&grown, 400, 0, target_h as usize);
+
+    assert!(
+        grown_ink > plain_ink + plain_ink / 2,
+        "viewport render must recover the cropped lines (plain {plain_ink}, grown {grown_ink})"
+    );
+    // And the recovered ink includes the TOP line: the first 40 design-px of
+    // the grown viewport (above the old canvas origin) must hold glyphs.
+    let above_origin_rows = (-view_y).floor() as usize;
+    assert!(above_origin_rows > 20, "growth must extend above the origin");
+    let top_ink = alpha_in_band(&grown, 400, 0, above_origin_rows);
+    assert!(top_ink > 0, "the once-cropped first line must render above the old origin");
+
+    crate::capi::kine_document_free(handle);
+}
+
+#[test]
+fn ink_union_measures_grown_text_instead_of_cropping_at_the_design_box() {
+    register_font();
+
+    let doc = r##"{ "version": 1, "size": { "width": 400, "height": 100 },
+      "inputs": [ { "key": "text", "type": "string", "default": "A" } ],
+      "root": { "kind": "text", "key": "line", "role": "text",
+        "content": { "input": "text" },
+        "frame": { "x": 0, "y": 0, "width": 400, "height": 100 },
+        "style": { "fontFamily": "Bebas Neue", "size": 40, "lineHeight": 1.2,
+                   "align": "center", "valign": "center", "fill": "#FFFFFF" } } }"##;
+    let c_doc = CString::new(doc).unwrap();
+    let handle = crate::capi::kine_document_create(c_doc.as_ptr());
+    assert!(handle > 0, "{}", last_error());
+    let signals = CString::new(r#"{ "text": "One\nTwo\nThree\nFour\nFive" }"#).unwrap();
+
+    let ink = take(crate::capi::kine_document_ink_union(handle, signals.as_ptr(), 1, 0.0, 200, 50))
+        .expect("ink");
+    let ink: serde_json::Value = serde_json::from_slice(&ink).unwrap();
+    let canvas_h = ink["canvasHeight"].as_f64().unwrap();
+    let canvas_y = ink["canvasY"].as_f64().unwrap();
+    assert!(canvas_h > 200.0, "probe canvas must be the GROWN box (got {canvas_h})");
+    assert!(canvas_y < -40.0, "grown box extends above the design origin (got {canvas_y})");
+    // Five lines fill most of the grown box vertically — nothing cropped.
+    let h = ink["height"].as_f64().unwrap();
+    assert!(h > 0.8, "ink must span the grown canvas, got fraction {h}");
+
+    crate::capi::kine_document_free(handle);
+}
+

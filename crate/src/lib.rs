@@ -9,11 +9,13 @@
 //! [`fonts`]; `capi` is glue only.
 
 mod assets;
+mod bubble;
 mod capi;
 mod error;
 mod eval;
 mod fonts;
 mod handle;
+mod log;
 mod render;
 mod schema;
 mod validate;

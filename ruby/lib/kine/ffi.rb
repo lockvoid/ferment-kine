@@ -44,6 +44,9 @@ module Kine
     attach_function :kine_render_document,
                     [:pointer, :double, :pointer, :uint32, :uint32],
                     Buf.by_value, blocking: true
+    attach_function :kine_ink_union,
+                    [:pointer, :pointer, :uint32, :double, :uint32, :uint32],
+                    Buf.by_value
     attach_function :kine_probe, [:pointer], Buf.by_value
     attach_function :kine_buf_free, [Buf.by_value], :void
     attach_function :kine_last_error, [], :string

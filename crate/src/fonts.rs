@@ -47,6 +47,12 @@ pub fn register(bytes: &[u8]) -> Result<usize, String> {
     for (family_id, _) in registered {
         if let Some(name) = reg.collection.family_name(family_id) {
             let name = name.to_string();
+            // Announce the NAME-TABLE family — the key documents must resolve
+            // by. A host whose catalog name differs sees the mismatch here.
+            crate::log::emit(
+                crate::log::INFO,
+                &format!("registered font family \"{name}\""),
+            );
             if !reg.families.contains(&name) {
                 reg.families.push(name);
             }

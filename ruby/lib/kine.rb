@@ -38,6 +38,21 @@ module Kine
     read_buffer(result) || raise(Error, last_error || "render failed")
   end
 
+  # Union INK rect across `samples` frames over [0, span] seconds at a probe
+  # raster — {"x","y","width","height"} Hash in design-box fractions, or nil
+  # for a fully-blank document. The crate's one definition of visual bounds
+  # (sticker normalization + preview trimming read THIS, byte-identical with
+  # the iOS selection border).
+  def ink_union(doc, signals: {}, samples: 1, span: 0.0, width: 160, height: 160)
+    doc_ptr = cstring(encode_json(doc))
+    signals_ptr = cstring(encode_json(signals))
+    result = FFI.kine_ink_union(doc_ptr, signals_ptr, samples, span.to_f, width, height)
+    json = read_buffer(result)
+    raise(Error, last_error || "ink probe failed") if json.nil? && last_error
+    return nil if json.nil? || json.empty?
+    JSON.parse(json)
+  end
+
   # Describe a document's inputs → parsed JSON Hash. Phase 0 returns a stub.
   def probe(doc)
     result = FFI.kine_probe(cstring(encode_json(doc)))

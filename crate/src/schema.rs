@@ -699,6 +699,8 @@ pub struct TextStyle {
     pub shadow: Option<TextShadow>,
     #[serde(default)]
     pub pill: Option<TextPill>,
+    #[serde(default)]
+    pub backdrop: Option<TextBackdrop>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -746,6 +748,27 @@ pub struct TextShadow {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TextPill {
+    pub color: ColorValue,
+    #[serde(default)]
+    pub radius: Option<Bindable<f64>>,
+    #[serde(default)]
+    pub padding_x: Option<Bindable<f64>>,
+    #[serde(default)]
+    pub padding_y: Option<Bindable<f64>>,
+    /// Base per-word opacity (default 1). A document that hosts a pill only
+    /// as an animation target (karaoke emphasis) sets 0 — pills stay hidden
+    /// until a `pillOpacity` animator raises them.
+    #[serde(default)]
+    pub opacity: Option<Bindable<f64>>,
+}
+
+/// A per-LINE background strip: the union hull of the line's word boxes,
+/// padded and rounded, drawn as ONE path beneath pills and glyphs — so a
+/// translucent background can never seam or double-blend between words
+/// (which per-word pills structurally do).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TextBackdrop {
     pub color: ColorValue,
     #[serde(default)]
     pub radius: Option<Bindable<f64>>,
