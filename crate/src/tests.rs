@@ -2274,3 +2274,27 @@ fn ink_union_measures_grown_text_instead_of_cropping_at_the_design_box() {
     crate::capi::kine_document_free(handle);
 }
 
+/// The embedded default family: "Inter" renders on a host that never called
+/// `kine_register_font` (this test deliberately does NOT register the test
+/// font). Non-blank output proves both registration-at-init and glyph
+/// resolution; without the embed this errors "no fonts registered".
+#[test]
+fn embedded_inter_renders_without_registration() {
+    let doc = r##"{ "version": 1, "size": { "width": 200, "height": 80 },
+      "root": { "kind": "group", "key": "g", "children": [
+        { "kind": "text", "key": "t", "content": "Inter",
+          "frame": { "x": 0, "y": 10, "width": 200, "height": 60 },
+          "style": { "fontFamily": "Inter", "weight": 700, "size": 32,
+                     "align": "center", "valign": "center", "fill": "#FFFFFF" } } ] } }"##;
+    let png = take(render(doc, 0.0, "{}", 200, 80)).expect("embedded Inter must render");
+    let decoder = png::Decoder::new(std::io::Cursor::new(png.as_slice()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("size")];
+    let info = reader.next_frame(&mut buf).expect("frame");
+    let inked = buf[..info.buffer_size()]
+        .chunks_exact(4)
+        .filter(|px| px[3] > 0)
+        .count();
+    assert!(inked > 100, "embedded Inter drew no glyph pixels ({inked})");
+}
+
