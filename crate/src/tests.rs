@@ -647,6 +647,16 @@ fn empty_document_fails_validation_not_abort() {
 
 static CAPTURED_LOGS: std::sync::Mutex<Vec<(i32, String)>> = std::sync::Mutex::new(Vec::new());
 
+/// The log callback is PROCESS-GLOBAL and tests run in parallel, so any test
+/// that installs it must hold this first — otherwise one test uninstalls the
+/// sink while another is still relying on it (which is exactly how the atlas
+/// occupancy test flaked: "atlas filled without ever warning").
+static LOG_SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_log_sink() -> std::sync::MutexGuard<'static, ()> {
+    LOG_SINK_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 extern "C" fn capture_log(level: i32, message: *const std::ffi::c_char) {
     let text = unsafe { std::ffi::CStr::from_ptr(message) }
         .to_string_lossy()
@@ -656,6 +666,7 @@ extern "C" fn capture_log(level: i32, message: *const std::ffi::c_char) {
 
 #[test]
 fn log_sink_hears_font_registrations_and_errors() {
+    let _sink = lock_log_sink();
     kine_set_log_callback(Some(capture_log));
     register_font();
     let doc = r##"{ "version": 1, "size": { "width": 64, "height": 64 },
@@ -2298,3 +2309,499 @@ fn embedded_inter_renders_without_registration() {
     assert!(inked > 100, "embedded Inter drew no glyph pixels ({inked})");
 }
 
+
+// --- GPU flavor availability (both feature sets) ---------------------------------
+
+/// `kine_gpu_available` is the ONE gpu symbol present in every build, so hosts
+/// branch on it instead of probing for symbols they cannot link. It must answer
+/// truthfully for the build it is compiled into — a CPU-only core (ruby gem,
+/// rails server) says 0 and carries no other kine_gpu_* entry point.
+#[test]
+fn gpu_availability_matches_the_build() {
+    let expected = i32::from(cfg!(all(feature = "gpu", target_vendor = "apple")));
+    assert_eq!(
+        crate::kine_gpu_available(),
+        expected,
+        "kine_gpu_available lied about this build"
+    );
+}
+
+// --- G1: CPU/GPU raster parity (feature = "gpu") ---------------------------------
+//
+// GPU output is NOT byte-identical to CPU — different raster back-ends over the
+// same vello_common geometry — so this is a THRESHOLD gate, not a golden one.
+// Ruling (S0.2): PSNR >= 50 dB AND <= 0.05% of pixels differing by more than
+// 8/255, dimensions identical, max|d| printed. Every run also dumps a
+// side-by-side + amplified-diff gallery under target/gpu-parity/ for eyeball
+// review before any commit go.
+
+#[cfg(feature = "gpu")]
+mod gpu_parity {
+    use super::*;
+    use crate::gpu::GpuEngine;
+
+    const MIN_PSNR_DB: f64 = 50.0;
+    const MAX_PCT_OFF: f64 = 0.05;
+    /// A channel delta at or under this is indistinguishable and not counted.
+    const CHANNEL_TOLERANCE: u8 = 8;
+
+    struct Metrics {
+        psnr: f64,
+        pct_off: f64,
+        max_channel: u8,
+    }
+
+    fn compare(cpu: &[u8], gpu: &[u8]) -> Metrics {
+        assert_eq!(cpu.len(), gpu.len(), "raster byte lengths differ");
+        let (mut square_error, mut off, mut max_channel) = (0f64, 0usize, 0u8);
+        let pixels = cpu.len() / 4;
+        for i in 0..pixels {
+            let mut worst = 0u8;
+            for k in 0..4 {
+                let delta = (cpu[i * 4 + k] as i32 - gpu[i * 4 + k] as i32).unsigned_abs() as u8;
+                square_error += (delta as f64) * (delta as f64);
+                worst = worst.max(delta);
+            }
+            if worst > CHANNEL_TOLERANCE {
+                off += 1;
+            }
+            max_channel = max_channel.max(worst);
+        }
+        let mse = square_error / cpu.len() as f64;
+        Metrics {
+            psnr: if mse == 0.0 {
+                f64::INFINITY
+            } else {
+                10.0 * (255.0f64 * 255.0 / mse).log10()
+            },
+            pct_off: off as f64 * 100.0 / pixels as f64,
+            max_channel,
+        }
+    }
+
+    /// Premultiplied in, straight out — PNG carries straight alpha.
+    fn straight(premultiplied: &[u8]) -> Vec<u8> {
+        premultiplied
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let a = p[3];
+                if a == 0 {
+                    return [0, 0, 0, 0];
+                }
+                let f = |v: u8| ((v as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8;
+                [f(p[0]), f(p[1]), f(p[2]), a]
+            })
+            .collect()
+    }
+
+    fn write_png(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(rgba)
+            .unwrap();
+    }
+
+    fn gallery() -> std::path::PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/gpu-parity");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Evaluate a document to a resolved scene, then raster it both ways.
+    fn both_rasters(
+        engine: &mut GpuEngine,
+        doc: &str,
+        t: f64,
+        signals: &str,
+        w: u32,
+        h: u32,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let parsed = crate::schema::parse(doc).expect("doc parses");
+        let compiled = crate::validate::validate(parsed).expect("doc validates");
+        let signals: serde_json::Value = serde_json::from_str(signals).unwrap();
+        let scene = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, t)
+            .expect("doc evaluates");
+        let viewport = (0.0, scene.height);
+        let cpu = crate::render::render_rgba(&scene, w, h).expect("cpu raster");
+        let gpu = engine
+            .render_rgba(&scene, w, h, viewport)
+            .expect("gpu raster");
+        (cpu, gpu)
+    }
+
+    fn assert_parity(engine: &mut GpuEngine, name: &str, doc: &str, t: f64, signals: &str, w: u32, h: u32) {
+        let (cpu, gpu) = both_rasters(engine, doc, t, signals, w, h);
+        assert_eq!(
+            cpu.len(),
+            (w * h * 4) as usize,
+            "{name}: cpu raster is not {w}x{h}"
+        );
+        assert_eq!(gpu.len(), cpu.len(), "{name}: gpu raster dimensions differ");
+
+        let dir = gallery();
+        write_png(&dir.join(format!("{name}_cpu.png")), &straight(&cpu), w, h);
+        write_png(&dir.join(format!("{name}_gpu.png")), &straight(&gpu), w, h);
+        let heat: Vec<u8> = cpu
+            .chunks_exact(4)
+            .zip(gpu.chunks_exact(4))
+            .flat_map(|(a, b)| {
+                let d = (0..4).map(|k| (a[k] as i32 - b[k] as i32).abs()).max().unwrap() as u8;
+                let v = d.saturating_mul(8);
+                [v, if d > 32 { 0 } else { v }, if d > 32 { 0 } else { v }, 255]
+            })
+            .collect();
+        write_png(&dir.join(format!("{name}_diff.png")), &heat, w, h);
+
+        let m = compare(&cpu, &gpu);
+        println!(
+            "gpu-parity {name:<24} {w}x{h}  PSNR={:.2} dB  off={:.4}%  max|d|={}",
+            m.psnr, m.pct_off, m.max_channel
+        );
+        assert!(
+            m.psnr >= MIN_PSNR_DB,
+            "{name}: PSNR {:.2} dB below the {MIN_PSNR_DB} dB gate (max|d|={}) — see target/gpu-parity/{name}_diff.png",
+            m.psnr,
+            m.max_channel
+        );
+        assert!(
+            m.pct_off <= MAX_PCT_OFF,
+            "{name}: {:.4}% of pixels differ by more than {CHANNEL_TOLERANCE}/255, gate is {MAX_PCT_OFF}% — see target/gpu-parity/{name}_diff.png",
+            m.pct_off
+        );
+    }
+
+    /// Every fixture document, both flavors, one engine — so the renderer's
+    /// size re-configuration is exercised across differing canvases too.
+    #[test]
+    fn fixture_corpus_matches_cpu() {
+        register_font();
+        let mut engine = GpuEngine::new().expect("gpu engine");
+
+        // Feature fixtures, at their declared size, with the same fixed signals
+        // the CPU goldens use.
+        let features: &[(&str, &str)] = &[
+            ("linear_gradient", include_str!("../tests/fixtures/features/linear_gradient.json")),
+            ("radial_gradient", include_str!("../tests/fixtures/features/radial_gradient.json")),
+            ("stroke_caps_joins", include_str!("../tests/fixtures/features/stroke_caps_joins.json")),
+            ("opacity_layer", include_str!("../tests/fixtures/features/opacity_layer.json")),
+            ("shadow", include_str!("../tests/fixtures/features/shadow.json")),
+            ("pill", include_str!("../tests/fixtures/features/pill.json")),
+            ("activefill", include_str!("../tests/fixtures/features/activefill.json")),
+            ("glyph_transform", include_str!("../tests/fixtures/features/glyph_transform.json")),
+            ("opaque_fill", OPAQUE_FILL),
+            ("translucent_fill", TRANSLUCENT_FILL),
+        ];
+        for (name, doc) in features {
+            let size: serde_json::Value = serde_json::from_str(doc).unwrap();
+            let w = size["size"]["width"].as_u64().unwrap() as u32;
+            let h = size["size"]["height"].as_u64().unwrap() as u32;
+            assert_parity(&mut engine, name, doc, 0.0, r#"{"progress":0.6}"#, w, h);
+        }
+
+        // The test card across the same (t, signals) triple the goldens pin.
+        for (name, t, signals) in [
+            ("card_t0_p0", 0.0, r#"{"progress":0}"#),
+            ("card_t05_p05", 0.5, r#"{"progress":0.5}"#),
+            ("card_t05_p1", 0.5, r#"{"progress":1}"#),
+        ] {
+            assert_parity(&mut engine, name, TEST_CARD, t, signals, 512, 512);
+        }
+
+        assert_parity(&mut engine, "text_decorations", DECORATIONS, 0.0, "{}", 400, 200);
+        assert_parity(&mut engine, "colors_derivation", COLORS_DERIVATION, 0.0, "{}", 320, 320);
+        assert_parity(&mut engine, "minimal", MINIMAL, 0.0, "{}", 64, 64);
+    }
+
+    /// Embedded rasters are the ONE place the flavors diverge structurally:
+    /// vello_hybrid rejects `ImageSource::Pixmap` outright, so these prove the
+    /// atlas upload path, including an ANIMATED asset sampled at two times
+    /// (two different frames of one asset, both atlas-resident).
+    #[test]
+    fn image_documents_match_cpu() {
+        let mut engine = GpuEngine::new().expect("gpu engine");
+
+        let still = image_doc(
+            64,
+            64,
+            "image/png",
+            &png_b64(&quadrants(4)),
+            &image_node("cover", 0, 0, 64, 64, r#","cornerRadius":32"#),
+        );
+        assert_parity(&mut engine, "image_still", &still, 0.0, "{}", 64, 64);
+
+        let frames = [
+            solid(4, 4, [220, 20, 20, 255]),
+            solid(4, 4, [20, 200, 20, 255]),
+            solid(4, 4, [20, 20, 220, 255]),
+        ];
+        let animated = image_doc(
+            32,
+            32,
+            "image/gif",
+            &gif_b64(&frames, 100),
+            &image_node("fill", 0, 0, 32, 32, ""),
+        );
+        assert_parity(&mut engine, "image_anim_t0", &animated, 0.0, "{}", 32, 32);
+        assert_parity(&mut engine, "image_anim_t1", &animated, 0.15, "{}", 32, 32);
+    }
+
+    /// A scrub re-renders the same document every frame: the atlas must be
+    /// populated once, not once per frame, and repeated renders through one
+    /// engine must stay pixel-stable.
+    #[test]
+    fn repeated_renders_reuse_the_atlas_and_stay_stable() {
+        let mut engine = GpuEngine::new().expect("gpu engine");
+        let doc = image_doc(
+            64,
+            64,
+            "image/png",
+            &png_b64(&quadrants(4)),
+            &image_node("cover", 0, 0, 64, 64, ""),
+        );
+        let (_, first) = both_rasters(&mut engine, &doc, 0.0, "{}", 64, 64);
+        for _ in 0..8 {
+            let (_, again) = both_rasters(&mut engine, &doc, 0.0, "{}", 64, 64);
+            assert_eq!(first, again, "repeated GPU renders diverged");
+        }
+    }
+
+    /// The atlas is keyed by the decoded frame's ADDRESS. A live `Weak` pins the
+    /// allocation, so an entry can never be shadowed by a different pixmap at the
+    /// same address; what this guards is the RECLAIM half — dead entries must
+    /// give their atlas slot back, and doing so must not corrupt the frame being
+    /// drawn. (It caught exactly that: destroying through the frame's own encoder
+    /// wiped images the same frame had staged through `queue.write_texture`.)
+    /// Renders DISTINCT image documents, freeing each one's assets before the
+    /// next is compiled, and checks every frame against its own CPU raster.
+    #[test]
+    fn freed_documents_do_not_leave_stale_atlas_entries() {
+        let mut engine = GpuEngine::new().expect("gpu engine");
+        let colors = [
+            [220, 20, 20, 255],
+            [20, 200, 20, 255],
+            [20, 20, 220, 255],
+            [230, 220, 30, 255],
+            [30, 210, 210, 255],
+            [210, 40, 200, 255],
+        ];
+        for (i, rgba) in colors.iter().enumerate() {
+            let doc = image_doc(
+                32,
+                32,
+                "image/png",
+                &png_b64(&solid(4, 4, *rgba)),
+                &image_node("fill", 0, 0, 32, 32, ""),
+            );
+            // both_rasters compiles and drops the document inside, so the decoded
+            // Arc<Pixmap> dies before the next iteration allocates.
+            let (cpu, gpu) = both_rasters(&mut engine, &doc, 0.0, "{}", 32, 32);
+            let m = compare(&cpu, &gpu);
+            assert!(
+                m.max_channel <= CHANNEL_TOLERANCE,
+                "doc {i} ({rgba:?}) served stale atlas pixels: max|d|={} (PSNR {:.2} dB)",
+                m.max_channel,
+                m.psnr
+            );
+        }
+        assert_eq!(
+            engine.cached_image_count(),
+            1,
+            "dead atlas entries accumulated instead of being evicted"
+        );
+    }
+
+    /// The RULED shipping seam: the engine is built on a HOST-owned MTLDevice
+    /// and MTLCommandQueue rather than wgpu's own. Proves the handoff actually
+    /// constructs (raw pointer -> retained -> wgpu-hal -> wgpu device) and that
+    /// what it renders still matches the CPU flavor. The macOS host has Metal,
+    /// so this runs here and does not wait for the app.
+    ///
+    /// NOT proven here: that work on this shared queue is ordered against the
+    /// COMPOSITOR's own command buffers. That needs the app and is S2/S3's gate.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn engine_builds_on_a_host_owned_device_and_queue() {
+        use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice};
+
+        register_font();
+        let device = MTLCreateSystemDefaultDevice().expect("host MTLDevice");
+        let queue = device.newCommandQueue().expect("host MTLCommandQueue");
+
+        let mut engine = unsafe {
+            GpuEngine::from_metal(
+                objc2::rc::Retained::as_ptr(&device) as *mut std::ffi::c_void,
+                objc2::rc::Retained::as_ptr(&queue) as *mut std::ffi::c_void,
+            )
+        }
+        .expect("engine on the host device+queue");
+        assert!(
+            engine.adapter().contains("host device+queue"),
+            "engine did not report the host handoff: {}",
+            engine.adapter()
+        );
+
+        assert_parity(&mut engine, "host_queue_card", TEST_CARD, 0.5, r#"{"progress":0.5}"#, 512, 512);
+    }
+
+    /// Atlas pressure must be ANNOUNCED before it becomes a fallback. Ruled at
+    /// ~75%: entries are owned by the documents that hold them, so kine cannot
+    /// evict — but the host, which knows which projects are live, can act if it
+    /// is told. Silence would mean the first symptom is documents quietly
+    /// dropping to the CPU flavor.
+    #[test]
+    fn atlas_occupancy_warns_before_it_is_full() {
+        let _sink = lock_log_sink();
+        CAPTURED_LOGS.lock().unwrap().clear();
+        kine_set_log_callback(Some(capture_log));
+        let mut engine = GpuEngine::new().expect("gpu engine");
+        let mut alive = Vec::new();
+        let mut warned_at: Option<f64> = None;
+
+        // 2048x2048 assets, held alive, until the warning fires or the atlas
+        // refuses — whichever comes first.
+        for _ in 0..40u32 {
+            let doc = image_doc(
+                32,
+                32,
+                "image/png",
+                &png_b64(&solid(2048, 2048, [10, 20, 30, 255])),
+                &image_node("fill", 0, 0, 32, 32, ""),
+            );
+            let compiled = crate::validate::validate(crate::schema::parse(&doc).unwrap()).unwrap();
+            let scene = crate::eval::evaluate(
+                &compiled.doc,
+                &compiled.assets,
+                &serde_json::Value::Null,
+                0.0,
+            )
+            .unwrap();
+            if engine.render_rgba(&scene, 32, 32, (0.0, scene.height)).is_err() {
+                break;
+            }
+            alive.push(compiled);
+
+            let fired = CAPTURED_LOGS
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(level, text)| *level == 1 && text.contains("gpu image atlas"));
+            if fired && warned_at.is_none() {
+                warned_at = Some(engine.atlas_occupancy());
+            }
+        }
+        kine_set_log_callback(None);
+
+        let occupancy = warned_at.expect("atlas filled without ever warning");
+        assert!(
+            (0.75..1.0).contains(&occupancy),
+            "warning fired at {occupancy:.2} occupancy, expected the ruled ~0.75 threshold"
+        );
+        let logs = CAPTURED_LOGS.lock().unwrap();
+        let warning = logs
+            .iter()
+            .find(|(level, text)| *level == 1 && text.contains("gpu image atlas"))
+            .expect("warning text missing");
+        assert!(
+            warning.1.contains("% full") && warning.1.contains("live assets"),
+            "warning does not say how full or how many assets: {}",
+            warning.1
+        );
+        // It must not spam: one report per climb, not one per upload. Asserted
+        // on the ENGINE, because the log sink is process-global and a
+        // concurrently-running atlas test emits into the same buffer.
+        assert_eq!(
+            engine.atlas_warning_count(),
+            1,
+            "occupancy warning fired {} times, expected once per climb",
+            engine.atlas_warning_count()
+        );
+    }
+
+    /// Atlas exhaustion must be kine's ERROR, never a panic crossing the FFI.
+    ///
+    /// Measured (S2): `Renderer::upload_image` unwraps the allocation, so 32
+    /// live 2048x2048 assets — the ceiling of 8 atlases x 4096^2 — make
+    /// vello_hybrid panic with `AtlasLimitReached`
+    /// (`vello_hybrid/src/render/wgpu.rs:596`). kine catches it at the upload.
+    ///
+    /// The sibling failure, `AtlasError::TextureTooLarge`, is UNREACHABLE through
+    /// a document: `assets.rs` caps an embedded image at 2048x2048 (MAX_DIM), so
+    /// an oversized frame is a validation error long before the atlas sees it.
+    #[test]
+    fn atlas_exhaustion_is_an_error_not_a_panic() {
+        let mut engine = GpuEngine::new().expect("gpu engine");
+        // Hold every document so nothing is evicted and the atlas really fills.
+        let mut alive = Vec::new();
+        let mut failure = None;
+
+        for i in 0..40u32 {
+            let doc = image_doc(
+                32,
+                32,
+                "image/png",
+                &png_b64(&solid(2048, 2048, [(i * 6) as u8, 40, 200, 255])),
+                &image_node("fill", 0, 0, 32, 32, ""),
+            );
+            let compiled = crate::validate::validate(crate::schema::parse(&doc).unwrap()).unwrap();
+            let scene = crate::eval::evaluate(
+                &compiled.doc,
+                &compiled.assets,
+                &serde_json::Value::Null,
+                0.0,
+            )
+            .unwrap();
+            let viewport = (0.0, scene.height);
+            match engine.render_rgba(&scene, 32, 32, viewport) {
+                Ok(_) => alive.push(compiled),
+                Err(message) => {
+                    failure = Some((i, message));
+                    break;
+                }
+            }
+        }
+
+        let (index, message) = failure.expect(
+            "40 live 2048x2048 assets should exhaust an 8 x 4096^2 atlas — capacity changed?",
+        );
+        assert!(
+            message.contains("atlas is full"),
+            "exhaustion reported the wrong error at asset {index}: {message}"
+        );
+        assert!(
+            index >= 8,
+            "atlas gave out after only {index} assets — far below the expected ceiling"
+        );
+
+        // The engine must SURVIVE: the allocation fails before it mutates the
+        // cache, so a document that needs no new atlas space still renders. This
+        // is what makes the host's CPU fallback a per-document decision rather
+        // than a dead engine.
+        register_font();
+        assert_parity(&mut engine, "atlas_full_recovery", MINIMAL, 0.0, "{}", 64, 64);
+    }
+
+    /// The size guard is shared with the CPU flavor — the GPU path must not
+    /// accept a raster the CPU path refuses.
+    #[test]
+    fn rejects_sizes_the_cpu_flavor_rejects() {
+        let mut engine = GpuEngine::new().expect("gpu engine");
+        let parsed = crate::schema::parse(MINIMAL).unwrap();
+        let compiled = crate::validate::validate(parsed).unwrap();
+        let scene = crate::eval::evaluate(
+            &compiled.doc,
+            &compiled.assets,
+            &serde_json::Value::Null,
+            0.0,
+        )
+        .unwrap();
+        assert!(engine.render_rgba(&scene, 0, 64, (0.0, scene.height)).is_err());
+        assert!(engine
+            .render_rgba(&scene, 70_000, 64, (0.0, scene.height))
+            .is_err());
+        assert!(engine.render_rgba(&scene, 64, 64, (0.0, 0.0)).is_err());
+    }
+}

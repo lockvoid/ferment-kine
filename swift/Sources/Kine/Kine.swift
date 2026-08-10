@@ -265,3 +265,93 @@ private func signalsJSON(_ signals: [String: Any]) throws -> String {
     let data = try JSONSerialization.data(withJSONObject: signals)
     return String(decoding: data, as: UTF8.self)
 }
+
+#if canImport(Metal)
+    import Metal
+
+    extension Kine {
+        /// Whether this build carries the GPU raster flavor. A CPU-only build of
+        /// the core (the ruby gem, the rails server) has none of the GPU entry
+        /// points; the xcframework is always built with them.
+        public static var gpuAvailable: Bool { kine_gpu_available() == 1 }
+
+        /// The GPU raster venue, built on the HOST's device and queue.
+        ///
+        /// Sharing the host's `MTLCommandQueue` is the point: kine's raster and
+        /// the host's own command buffers are then ordered by Metal, so a render
+        /// can submit and return instead of blocking on the GPU. Create ONE per
+        /// process — it owns the image atlas and the renderer — and keep it
+        /// alive for as long as you render.
+        ///
+        /// `@unchecked Sendable`: the handle is immutable after `init` and the
+        /// core serializes renders on the engine internally.
+        public final class GPUEngine: @unchecked Sendable {
+            private let handle: Int64
+
+            /// Throws if the GPU flavor is absent, if the device is not the
+            /// system default (kine refuses to cross devices rather than
+            /// silently rendering on another GPU), or if wgpu cannot be built on
+            /// the handles given.
+            public init(device: MTLDevice, commandQueue: MTLCommandQueue) throws {
+                guard Kine.gpuAvailable else {
+                    throw KineError.failed("this kine build has no GPU flavor")
+                }
+                let handle = kine_gpu_engine_create(
+                    Unmanaged.passUnretained(device as AnyObject).toOpaque(),
+                    Unmanaged.passUnretained(commandQueue as AnyObject).toOpaque()
+                )
+                guard handle != 0 else { throw KineError.current("gpu engine creation failed") }
+                self.handle = handle
+            }
+
+            deinit { kine_gpu_engine_destroy(handle) }
+
+            fileprivate var id: Int64 { handle }
+        }
+    }
+
+    extension Kine.Document {
+        /// Rasterize into a texture YOU own and created. Must be
+        /// `.rgba8Unorm`, exactly `width`×`height`, and declare
+        /// `.renderTarget` usage — all three are checked by the core.
+        ///
+        /// SUBMITS AND RETURNS: the GPU work is queued, not waited on. Because
+        /// the engine renders on the queue you handed it, your next command
+        /// buffer on that queue sees the finished pixels without a fence.
+        ///
+        /// Throws on any failure — an exhausted image atlas included — and
+        /// leaves the texture untouched, so the caller can fall back to
+        /// `renderRGBA` for that frame.
+        public func render(
+            t: Double, signals: [String: Any] = [:], width: Int, height: Int,
+            using engine: Kine.GPUEngine, into texture: MTLTexture
+        ) throws {
+            let json = try signalsJSON(signals)
+            let code = json.withCString {
+                kine_gpu_render_document(
+                    engine.id, handle, t, $0, UInt32(width), UInt32(height),
+                    Unmanaged.passUnretained(texture as AnyObject).toOpaque()
+                )
+            }
+            if code != 0 { throw Kine.KineError.current("gpu render failed") }
+        }
+
+        /// `render(into:)` over a vertical design-space viewport — pair with
+        /// `layoutSize()` exactly as with `renderRGBAViewport`.
+        public func render(
+            t: Double, signals: [String: Any] = [:], width: Int, height: Int,
+            viewY: Double, viewHeight: Double,
+            using engine: Kine.GPUEngine, into texture: MTLTexture
+        ) throws {
+            let json = try signalsJSON(signals)
+            let code = json.withCString {
+                kine_gpu_render_document_viewport(
+                    engine.id, handle, t, $0, UInt32(width), UInt32(height),
+                    viewY, viewHeight,
+                    Unmanaged.passUnretained(texture as AnyObject).toOpaque()
+                )
+            }
+            if code != 0 { throw Kine.KineError.current("gpu viewport render failed") }
+        }
+    }
+#endif

@@ -498,3 +498,171 @@ fn cstr<'a>(ptr: *const c_char, what: &str) -> Result<&'a str, String> {
 fn parse_json(text: &str, what: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(text).map_err(|e| format!("invalid {what} JSON: {e}"))
 }
+
+// --- GPU flavor (feature = "gpu") -------------------------------------------
+//
+// Same conventions as every entry point above: panic-proof, error-sentinel,
+// message on the thread-local last-error channel. The engine renders on the
+// HOST's device and queue and into the HOST's texture, so nothing here hands
+// ownership of a Metal object across the boundary in either direction — kine
+// borrows for the duration of the call and retains nothing but the device and
+// queue the engine was created with.
+
+/// Create the GPU engine on the host's `MTLDevice` and `MTLCommandQueue`.
+/// Returns the engine handle (> 0), or 0 on failure (see `kine_last_error`).
+///
+/// Both pointers are required: kine renders on the host's device so its output
+/// texture and the host's own draws share one device and one queue, which is
+/// what orders them without a fence or a blocking wait. Passing the device of a
+/// different GPU than the system default is refused rather than crossed.
+///
+/// ONE engine per process is the intended shape (it owns the image atlas and
+/// the renderer). Free with `kine_gpu_engine_destroy`.
+#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+#[no_mangle]
+pub extern "C" fn kine_gpu_engine_create(
+    mtl_device: *mut std::ffi::c_void,
+    mtl_queue: *mut std::ffi::c_void,
+) -> i64 {
+    error::clear();
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<i64, String> {
+        let engine = unsafe { crate::gpu::GpuEngine::from_metal(mtl_device, mtl_queue) }?;
+        Ok(crate::gpu::insert_engine(engine))
+    }));
+    match result {
+        Ok(Ok(id)) => id,
+        Ok(Err(message)) => {
+            error::set(message);
+            0
+        }
+        Err(_) => {
+            error::set("panic in kine_gpu_engine_create");
+            0
+        }
+    }
+}
+
+/// Destroy a GPU engine. Idempotent; a use-after-free reports an error on the
+/// next call, never a crash.
+#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+#[no_mangle]
+pub extern "C" fn kine_gpu_engine_destroy(engine: i64) {
+    let _ = catch_unwind(AssertUnwindSafe(|| crate::gpu::remove_engine(engine)));
+}
+
+/// Rasterize a document handle at time `t` into a HOST-owned `MTLTexture`.
+/// Returns 0 on success, -1 on failure (see `kine_last_error`).
+///
+/// The texture must be `MTLPixelFormatRGBA8Unorm`, exactly `width`x`height`, and
+/// carry `MTLTextureUsageRenderTarget`; all three are checked. kine writes
+/// premultiplied RGBA8, sRGB — the same bytes `kine_document_render_rgba`
+/// produces on the CPU.
+///
+/// SUBMITS AND RETURNS: it does not wait for the GPU. Ordering against the
+/// host's own command buffers is the shared queue's job, which is why the queue
+/// is a creation parameter.
+///
+/// On ANY failure the target texture is left untouched and the host should fall
+/// back to the CPU flavor for this frame.
+#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+#[no_mangle]
+pub extern "C" fn kine_gpu_render_document(
+    engine: i64,
+    document: i64,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+    mtl_texture: *mut std::ffi::c_void,
+) -> i32 {
+    gpu_render(
+        engine,
+        document,
+        t,
+        signals_json,
+        width,
+        height,
+        None,
+        mtl_texture,
+    )
+}
+
+/// `kine_gpu_render_document` over a vertical design-space viewport — the GPU
+/// twin of `kine_document_render_rgba_viewport`, for text that overflows the
+/// doc canvas.
+#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn kine_gpu_render_document_viewport(
+    engine: i64,
+    document: i64,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+    view_y: f64,
+    view_h: f64,
+    mtl_texture: *mut std::ffi::c_void,
+) -> i32 {
+    gpu_render(
+        engine,
+        document,
+        t,
+        signals_json,
+        width,
+        height,
+        Some((view_y, view_h)),
+        mtl_texture,
+    )
+}
+
+#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+#[allow(clippy::too_many_arguments)]
+fn gpu_render(
+    engine: i64,
+    document: i64,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+    viewport: Option<(f64, f64)>,
+    mtl_texture: *mut std::ffi::c_void,
+) -> i32 {
+    error::clear();
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let engine = crate::gpu::get_engine(engine)
+            .ok_or_else(|| "invalid or destroyed gpu engine handle".to_string())?;
+        let compiled = self::document(document)?;
+        let signals = if signals_json.is_null() {
+            serde_json::Value::Null
+        } else {
+            parse_json(cstr(signals_json, "signals")?, "signals")?
+        };
+        let scene = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, t)
+            .map_err(|e| e.to_string())?;
+        let viewport = viewport.unwrap_or((0.0, scene.height));
+        let mut engine = engine
+            .lock()
+            .map_err(|_| "gpu engine mutex poisoned".to_string())?;
+        unsafe { engine.render_to_metal_texture(&scene, width, height, viewport, mtl_texture) }
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) => {
+            error::set(message);
+            -1
+        }
+        Err(_) => {
+            error::set("panic in kine_gpu_render_document");
+            -1
+        }
+    }
+}
+
+/// Whether this build carries the GPU flavor at all. Hosts branch on this
+/// instead of probing for a symbol: the ruby gem and the rails server link a
+/// CPU-only build where every `kine_gpu_*` entry point is absent.
+#[no_mangle]
+pub extern "C" fn kine_gpu_available() -> i32 {
+    i32::from(cfg!(all(feature = "gpu", target_vendor = "apple")))
+}

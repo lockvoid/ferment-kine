@@ -4,6 +4,7 @@
 # Swift xcframework build artifacts (populated by scripts/build-xcframework.sh).
 /swift/KineCore.xcframework/
 /swift/.build/
+/swift/.swiftpm/
 
 .DS_Store
 

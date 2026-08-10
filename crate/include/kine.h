@@ -119,6 +119,64 @@ kine_buf kine_ink_union(const char *doc_json, const char *signals_json,
 /* Free a document handle. Idempotent; a use-after-free reports an error. */
 void kine_document_free(int64_t handle);
 
+/* ---- GPU flavor (Apple, built with --features gpu) ----------------------- */
+
+/* Whether this build carries the GPU flavor. ALWAYS present — hosts branch on
+ * this rather than probing for symbols, because a CPU-only build (the ruby gem,
+ * the rails server) has none of the kine_gpu_* entry points below. Returns 1
+ * when the flavor is compiled in, 0 otherwise. */
+int32_t kine_gpu_available(void);
+
+/* The entry points below exist only when kine_gpu_available() returns 1.
+ *
+ * The GPU flavor renders on the HOST's MTLDevice and MTLCommandQueue, into a
+ * texture the HOST creates and owns. No Metal object changes ownership across
+ * this boundary in either direction: kine retains the device and queue for the
+ * engine's lifetime and borrows the target texture for the duration of a render.
+ *
+ * Sharing the host's queue is what orders kine's raster against the host's own
+ * command buffers — which is why the queue is a creation parameter and why the
+ * render call submits and RETURNS rather than waiting for the GPU.
+ *
+ * Output is byte-shaped exactly like kine_document_render_rgba: premultiplied
+ * RGBA8, sRGB. It is NOT bit-identical to the CPU flavor (different raster
+ * back-ends over the same geometry); the crate's parity gate is PSNR >= 50 dB
+ * with <= 0.05% of pixels differing by more than 8/255. */
+
+/* Create the GPU engine on the host's device and queue (both required; both are
+ * id<MTLDevice> / id<MTLCommandQueue>). Returns the handle (> 0), or 0 on
+ * failure — see kine_last_error(). A device that is not the system default is
+ * REFUSED rather than silently crossed.
+ *
+ * One engine per process is the intended shape: it owns the image atlas and the
+ * renderer. Free with kine_gpu_engine_destroy. */
+int64_t kine_gpu_engine_create(void *mtl_device, void *mtl_queue);
+
+/* Destroy a GPU engine. Idempotent; a use-after-free reports an error. */
+void kine_gpu_engine_destroy(int64_t engine);
+
+/* Rasterize a document handle at time `t` into a host-owned id<MTLTexture>.
+ * Returns 0 on success, -1 on failure (see kine_last_error()).
+ *
+ * The texture must be MTLPixelFormatRGBA8Unorm, exactly width x height, and
+ * carry MTLTextureUsageRenderTarget; all three are checked. On ANY failure the
+ * texture is left untouched — the host falls back to the CPU flavor for that
+ * frame. Failure is a normal outcome, not an exception: an exhausted image
+ * atlas reports here rather than aborting.
+ *
+ * Renders serialize on the engine (it owns mutable atlas + renderer state). */
+int32_t kine_gpu_render_document(int64_t engine, int64_t document, double t,
+                                 const char *signals_json, uint32_t width,
+                                 uint32_t height, void *mtl_texture);
+
+/* kine_gpu_render_document over a vertical design-space viewport — the GPU twin
+ * of kine_document_render_rgba_viewport. */
+int32_t kine_gpu_render_document_viewport(int64_t engine, int64_t document,
+                                          double t, const char *signals_json,
+                                          uint32_t width, uint32_t height,
+                                          double view_y, double view_h,
+                                          void *mtl_texture);
+
 /* ---- shared ------------------------------------------------------------- */
 
 /* Release a buffer returned by any kine_* function above. */

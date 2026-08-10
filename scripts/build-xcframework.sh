@@ -39,9 +39,12 @@ module KineCore {
 }
 EOF
 
+# --features gpu: the Apple slices carry the vello_hybrid/wgpu raster flavor.
+# Deliberately NOT the default feature set — the ruby gem builds this same crate
+# without it and must never link the wgpu tree (see crate/Cargo.toml).
 args=()
 for target in "${TARGETS[@]}"; do
-  ( cd "$CRATE" && cargo build --release --locked --target "$target" )
+  ( cd "$CRATE" && cargo build --release --locked --features gpu --target "$target" )
   args+=(-library "$CRATE/target/$target/release/libkine.a" -headers "$STAGE/Headers")
 done
 

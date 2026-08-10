@@ -1,12 +1,20 @@
-//! Resolved scene → vello_cpu pixels → PNG. This module owns PIXELS: node
-//! walking with transform stacks, parley layout + unit segmentation for text,
-//! per-unit deltas at glyph_run time, pills, shadows, strokes. It consumes only
-//! eval's resolved types; values were decided upstream.
+//! Resolved scene → pixels → PNG. This module owns PIXELS: node walking with
+//! transform stacks, parley layout + unit segmentation for text, per-unit deltas
+//! at glyph_run time, pills, shadows, strokes. It consumes only eval's resolved
+//! types; values were decided upstream.
+//!
+//! The scene walk is generic over [`Canvas`], the one seam between kine and a
+//! rasterizer. `vello_cpu` backs it here (server, posters, fallback); `gpu.rs`
+//! backs it with `vello_hybrid` on device. There is exactly ONE `draw_*`
+//! implementation, so a document cannot drift between the two flavors.
+
+use std::sync::Arc;
 
 use vello_common::filter_effects::{Filter, FilterFunction};
+use vello_common::paint::{Image, ImageSource, PaintType};
 use vello_cpu::kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape as KurboShape, Stroke, Vec2};
 use vello_cpu::peniko::color::DynamicColor;
-use vello_cpu::peniko::{ColorStop, Gradient};
+use vello_cpu::peniko::{ColorStop, Gradient, ImageSampler};
 use vello_cpu::{Glyph, Pixmap, RenderContext, RenderSettings, Resources};
 
 use parley::{
@@ -22,6 +30,108 @@ use crate::bubble;
 use crate::fonts;
 use crate::schema::{Align, Fit, LineCap, LineJoin, VAlign};
 use crate::validate::UnitLevel;
+
+// --- the rasterizer seam ----------------------------------------------------------
+
+/// The raster surface the scene walk paints onto. Both flavors resolve the same
+/// `vello_common` geometry — only the back-end differs — so implementing this is
+/// the whole cost of adding a rasterizer.
+pub(crate) trait Canvas {
+    fn set_transform(&mut self, affine: Affine);
+    fn set_paint(&mut self, paint: impl Into<PaintType>);
+    /// Image paints are the ONE place the flavors diverge. vello_cpu samples a
+    /// `Pixmap` in place; vello_hybrid takes atlas-resident images only
+    /// (`ImageSource::Pixmap` is an `unimplemented!()` panic there), so the
+    /// CANVAS resolves the source, never the caller.
+    fn set_paint_image(&mut self, pixmap: &Arc<Pixmap>, sampler: ImageSampler);
+    fn set_paint_transform(&mut self, affine: Affine);
+    fn set_stroke(&mut self, stroke: Stroke);
+    fn fill_path(&mut self, path: &BezPath);
+    fn stroke_path(&mut self, path: &BezPath);
+    fn fill_rect(&mut self, rect: &Rect);
+    fn push_opacity_layer(&mut self, opacity: f32);
+    fn push_clip_layer(&mut self, path: &BezPath);
+    fn push_filter_layer(&mut self, filter: Option<Filter>);
+    fn pop_layer(&mut self);
+    /// Paint is set by the caller; this draws one glyph of `run` under the
+    /// already-composed unit transform.
+    fn draw_glyph(&mut self, run: &RunStyle, glyph: Glyph, linear: Affine, stroke: bool);
+}
+
+/// The `vello_cpu` flavor — the server's renderer, and the device's fallback.
+pub(crate) struct CpuCanvas<'a> {
+    ctx: &'a mut RenderContext,
+    resources: &'a mut Resources,
+}
+
+impl Canvas for CpuCanvas<'_> {
+    fn set_transform(&mut self, affine: Affine) {
+        self.ctx.set_transform(affine);
+    }
+
+    fn set_paint(&mut self, paint: impl Into<PaintType>) {
+        self.ctx.set_paint(paint);
+    }
+
+    fn set_paint_image(&mut self, pixmap: &Arc<Pixmap>, sampler: ImageSampler) {
+        self.ctx.set_paint(Image {
+            image: ImageSource::Pixmap(pixmap.clone()),
+            sampler,
+        });
+    }
+
+    fn set_paint_transform(&mut self, affine: Affine) {
+        self.ctx.set_paint_transform(affine);
+    }
+
+    fn set_stroke(&mut self, stroke: Stroke) {
+        self.ctx.set_stroke(stroke);
+    }
+
+    fn fill_path(&mut self, path: &BezPath) {
+        self.ctx.fill_path(path);
+    }
+
+    fn stroke_path(&mut self, path: &BezPath) {
+        self.ctx.stroke_path(path);
+    }
+
+    fn fill_rect(&mut self, rect: &Rect) {
+        self.ctx.fill_rect(rect);
+    }
+
+    fn push_opacity_layer(&mut self, opacity: f32) {
+        self.ctx.push_opacity_layer(opacity);
+    }
+
+    fn push_clip_layer(&mut self, path: &BezPath) {
+        self.ctx.push_clip_layer(path);
+    }
+
+    fn push_filter_layer(&mut self, filter: Option<Filter>) {
+        self.ctx.push_layer(None, None, None, None, filter);
+    }
+
+    fn pop_layer(&mut self) {
+        self.ctx.pop_layer();
+    }
+
+    fn draw_glyph(&mut self, run: &RunStyle, glyph: Glyph, linear: Affine, stroke: bool) {
+        let builder = self
+            .ctx
+            .glyph_run(self.resources, &run.font)
+            .font_size(run.size)
+            .normalized_coords(&run.coords)
+            .glyph_transform(linear)
+            .hint(false);
+        let glyphs = std::iter::once(glyph);
+        if stroke {
+            builder.stroke_glyphs(glyphs)
+        } else {
+            builder.fill_glyphs(glyphs)
+        }
+    }
+}
 
 /// Render to a PNG blob (RGBA8, straight/un-premultiplied alpha per PNG).
 pub fn render_png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -59,12 +169,9 @@ pub fn render_rgba(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, St
         .to_vec())
 }
 
-fn render_pixmap(
-    scene: &Scene,
-    width: u32,
-    height: u32,
-    viewport: (f64, f64),
-) -> Result<Pixmap, String> {
+/// Reject rasters no flavor should attempt. Shared, so the GPU path can never
+/// accept a size the CPU path refuses.
+pub(crate) fn validate_size(width: u32, height: u32) -> Result<(), String> {
     // 8192x8192 = 256 MB of RGBA — generous for real exports (covers 8K), and a
     // hard ceiling so a valid-per-dimension but enormous request (e.g. 65535x65535
     // ≈ 17 GB) is rejected rather than OOM-killing the process.
@@ -81,6 +188,29 @@ fn render_pixmap(
             "render area {width}x{height} exceeds {MAX_PIXELS} pixels"
         ));
     }
+    Ok(())
+}
+
+/// Design space → target pixels for a vertical viewport `(view_y, view_h)`.
+/// Shared so both flavors place the scene identically.
+pub(crate) fn root_transform(
+    scene: &Scene,
+    width: u32,
+    height: u32,
+    viewport: (f64, f64),
+) -> Affine {
+    let (view_y, view_h) = viewport;
+    Affine::scale_non_uniform(width as f64 / scene.width, height as f64 / view_h)
+        * Affine::translate((0.0, -view_y))
+}
+
+fn render_pixmap(
+    scene: &Scene,
+    width: u32,
+    height: u32,
+    viewport: (f64, f64),
+) -> Result<Pixmap, String> {
+    validate_size(width, height)?;
 
     // Single-threaded: the multi-threaded dispatcher doesn't support filter
     // effects (text shadows) yet, and one thread keeps renders deterministic
@@ -92,10 +222,14 @@ fn render_pixmap(
     let mut ctx = RenderContext::new_with(width as u16, height as u16, settings);
     let mut resources = Resources::new();
 
-    let (view_y, view_h) = viewport;
-    let root = Affine::scale_non_uniform(width as f64 / scene.width, height as f64 / view_h)
-        * Affine::translate((0.0, -view_y));
-    draw_node(&mut ctx, &mut resources, &scene.root, root)?;
+    let root = root_transform(scene, width, height, viewport);
+    {
+        let mut canvas = CpuCanvas {
+            ctx: &mut ctx,
+            resources: &mut resources,
+        };
+        draw_node(&mut canvas, &scene.root, root)?;
+    }
 
     let mut pixmap = Pixmap::new(width as u16, height as u16);
     ctx.flush();
@@ -103,67 +237,66 @@ fn render_pixmap(
     Ok(pixmap)
 }
 
-fn draw_node(
-    ctx: &mut RenderContext,
-    resources: &mut Resources,
+pub(crate) fn draw_node<C: Canvas>(
+    canvas: &mut C,
     node: &RNode,
     parent: Affine,
 ) -> Result<(), String> {
     match node {
         RNode::Group(group) => {
-            let layered = push_opacity(ctx, group.opacity);
+            let layered = push_opacity(canvas, group.opacity);
             let affine = parent * group.transform;
             for child in &group.children {
-                draw_node(ctx, resources, child, affine)?;
+                draw_node(canvas, child, affine)?;
             }
-            pop_opacity(ctx, layered);
+            pop_opacity(canvas, layered);
         }
         RNode::Shape(shape) => {
-            let layered = push_opacity(ctx, shape.opacity);
-            draw_shape(ctx, shape, parent);
-            pop_opacity(ctx, layered);
+            let layered = push_opacity(canvas, shape.opacity);
+            draw_shape(canvas, shape, parent);
+            pop_opacity(canvas, layered);
         }
         RNode::Image(image) => {
-            let layered = push_opacity(ctx, image.opacity);
-            draw_image(ctx, image, parent);
-            pop_opacity(ctx, layered);
+            let layered = push_opacity(canvas, image.opacity);
+            draw_image(canvas, image, parent);
+            pop_opacity(canvas, layered);
         }
         RNode::Text(text) => {
-            let layered = push_opacity(ctx, text.opacity);
-            draw_text(ctx, resources, text, parent)?;
-            pop_opacity(ctx, layered);
+            let layered = push_opacity(canvas, text.opacity);
+            draw_text(canvas, text, parent)?;
+            pop_opacity(canvas, layered);
         }
     }
     Ok(())
 }
 
-fn push_opacity(ctx: &mut RenderContext, opacity: f64) -> bool {
+fn push_opacity<C: Canvas>(canvas: &mut C, opacity: f64) -> bool {
     if opacity < 1.0 {
-        ctx.push_opacity_layer(opacity as f32);
+        canvas.push_opacity_layer(opacity as f32);
         true
     } else {
         false
     }
 }
 
-fn pop_opacity(ctx: &mut RenderContext, layered: bool) {
+fn pop_opacity<C: Canvas>(canvas: &mut C, layered: bool) {
     if layered {
-        ctx.pop_layer();
+        canvas.pop_layer();
     }
 }
 
 // --- shapes -----------------------------------------------------------------------
 
-fn draw_shape(ctx: &mut RenderContext, shape: &RShape, parent: Affine) {
-    ctx.set_transform(parent * shape.transform);
+fn draw_shape<C: Canvas>(canvas: &mut C, shape: &RShape, parent: Affine) {
+    canvas.set_transform(parent * shape.transform);
     if let Some(fill) = &shape.fill {
-        set_paint(ctx, fill);
-        ctx.fill_path(&shape.path);
+        set_paint(canvas, fill);
+        canvas.fill_path(&shape.path);
     }
     if let Some(stroke) = &shape.stroke {
-        ctx.set_paint(stroke.color);
-        ctx.set_stroke(build_stroke(stroke.width, stroke.cap, stroke.join));
-        ctx.stroke_path(&shape.path);
+        canvas.set_paint(stroke.color);
+        canvas.set_stroke(build_stroke(stroke.width, stroke.cap, stroke.join));
+        canvas.stroke_path(&shape.path);
     }
 }
 
@@ -182,9 +315,9 @@ fn build_stroke(width: f64, cap: LineCap, join: LineJoin) -> Stroke {
     })
 }
 
-fn set_paint(ctx: &mut RenderContext, paint: &RPaint) {
+fn set_paint<C: Canvas>(canvas: &mut C, paint: &RPaint) {
     match paint {
-        RPaint::Solid(color) => ctx.set_paint(*color),
+        RPaint::Solid(color) => canvas.set_paint(*color),
         RPaint::Linear {
             x1,
             y1,
@@ -194,12 +327,12 @@ fn set_paint(ctx: &mut RenderContext, paint: &RPaint) {
         } => {
             let gradient = Gradient::new_linear(Point::new(*x1, *y1), Point::new(*x2, *y2))
                 .with_stops(color_stops(stops).as_slice());
-            ctx.set_paint(gradient);
+            canvas.set_paint(gradient);
         }
         RPaint::Radial { cx, cy, r, stops } => {
             let gradient = Gradient::new_radial(Point::new(*cx, *cy), *r as f32)
                 .with_stops(color_stops(stops).as_slice());
-            ctx.set_paint(gradient);
+            canvas.set_paint(gradient);
         }
     }
 }
@@ -218,9 +351,8 @@ fn color_stops(stops: &[(f32, Color)]) -> Vec<ColorStop> {
 /// `contain` letterboxes (the empty margin stays transparent — only the placed
 /// rect is filled). The paint transform maps texel space onto the placed rect in
 /// document coordinates; the standard node transform/opacity apply around it.
-fn draw_image(ctx: &mut RenderContext, image: &RImage, parent: Affine) {
-    use vello_common::paint::{Image, ImageSource};
-    use vello_cpu::peniko::{Extend, ImageQuality, ImageSampler};
+fn draw_image<C: Canvas>(canvas: &mut C, image: &RImage, parent: Affine) {
+    use vello_cpu::peniko::{Extend, ImageQuality};
 
     let iw = image.image.width() as f64;
     let ih = image.image.height() as f64;
@@ -251,22 +383,21 @@ fn draw_image(ctx: &mut RenderContext, image: &RImage, parent: Affine) {
     let radius = image.corner_radius.max(0.0);
     let clip = RoundedRect::from_rect(frame, radius).to_path(0.1);
 
-    ctx.set_transform(parent * image.transform);
-    ctx.push_clip_layer(&clip);
-    let paint = Image {
-        image: ImageSource::Pixmap(image.image.clone()),
-        sampler: ImageSampler {
+    canvas.set_transform(parent * image.transform);
+    canvas.push_clip_layer(&clip);
+    canvas.set_paint_image(
+        &image.image,
+        ImageSampler {
             x_extend: Extend::Pad,
             y_extend: Extend::Pad,
             quality: ImageQuality::Medium,
             alpha: 1.0,
         },
-    };
-    ctx.set_paint(paint);
-    ctx.set_paint_transform(fit_affine);
-    ctx.fill_rect(&placed);
-    ctx.set_paint_transform(Affine::IDENTITY);
-    ctx.pop_layer();
+    );
+    canvas.set_paint_transform(fit_affine);
+    canvas.fill_rect(&placed);
+    canvas.set_paint_transform(Affine::IDENTITY);
+    canvas.pop_layer();
 }
 
 // --- text ------------------------------------------------------------------------
@@ -285,10 +416,10 @@ struct GlyphRecord {
 }
 
 /// Per-run draw parameters (font handle, size, variation coords).
-struct RunStyle {
-    font: vello_cpu::peniko::FontData,
-    size: f32,
-    coords: Vec<i16>,
+pub(crate) struct RunStyle {
+    pub(crate) font: vello_cpu::peniko::FontData,
+    pub(crate) size: f32,
+    pub(crate) coords: Vec<i16>,
 }
 
 /// Scalar per-unit transform state composed by animators.
@@ -419,12 +550,7 @@ pub fn grown_extents(scene: &Scene) -> (f64, f64) {
     (top, bottom)
 }
 
-fn draw_text(
-    ctx: &mut RenderContext,
-    resources: &mut Resources,
-    text: &RText,
-    parent: Affine,
-) -> Result<(), String> {
+fn draw_text<C: Canvas>(canvas: &mut C, text: &RText, parent: Affine) -> Result<(), String> {
     if text.content.is_empty() {
         return Ok(());
     }
@@ -665,7 +791,7 @@ fn draw_text(
 
     // --- draw: pills → shadow → fills → strokes ---------------------------------
 
-    ctx.set_transform(full);
+    canvas.set_transform(full);
 
     if let Some(backdrop) = &style.backdrop {
         // One hull per line (a line's words are horizontally contiguous),
@@ -716,9 +842,9 @@ fn draw_text(
             }
             path
         };
-        ctx.set_transform(full);
-        ctx.set_paint(backdrop.color);
-        ctx.fill_path(&path);
+        canvas.set_transform(full);
+        canvas.set_paint(backdrop.color);
+        canvas.fill_path(&path);
     }
 
     if let Some(pill) = &style.pill {
@@ -740,26 +866,25 @@ fn draw_text(
                 .unwrap_or(0);
             let affine = transforms[2][line].affine_about(line_boxes[line].center())
                 * transforms[1][word].affine_about(word_boxes[word].center());
-            ctx.set_transform(full * affine);
-            ctx.set_paint(with_opacity(pill_colors[word], opacity));
-            ctx.fill_path(&path);
+            canvas.set_transform(full * affine);
+            canvas.set_paint(with_opacity(pill_colors[word], opacity));
+            canvas.fill_path(&path);
         }
-        ctx.set_transform(full);
+        canvas.set_transform(full);
     }
 
     if let Some(shadow) = &style.shadow {
         let sigma = (shadow.blur * 0.5).max(0.0) as f32;
         let filter =
             (sigma > 0.0).then(|| Filter::from_function(FilterFunction::Blur { radius: sigma }));
-        ctx.push_layer(None, None, None, None, filter);
+        canvas.push_filter_layer(filter);
         for (g, record) in glyphs.iter().enumerate() {
             let opacity = glyph_opacity[g].clamp(0.0, 1.0);
             if opacity <= 0.0 {
                 continue;
             }
             draw_glyph(
-                ctx,
-                resources,
+                canvas,
                 &runs[record.run],
                 record,
                 glyph_affine(record),
@@ -768,7 +893,7 @@ fn draw_text(
                 None,
             );
         }
-        ctx.pop_layer();
+        canvas.pop_layer();
     }
 
     for (g, record) in glyphs.iter().enumerate() {
@@ -777,8 +902,7 @@ fn draw_text(
             continue;
         }
         draw_glyph(
-            ctx,
-            resources,
+            canvas,
             &runs[record.run],
             record,
             glyph_affine(record),
@@ -789,15 +913,14 @@ fn draw_text(
     }
 
     if let Some((stroke_color, stroke_width)) = &style.stroke {
-        ctx.set_stroke(Stroke::new(*stroke_width));
+        canvas.set_stroke(Stroke::new(*stroke_width));
         for (g, record) in glyphs.iter().enumerate() {
             let opacity = glyph_opacity[g].clamp(0.0, 1.0);
             if opacity <= 0.0 {
                 continue;
             }
             draw_glyph(
-                ctx,
-                resources,
+                canvas,
                 &runs[record.run],
                 record,
                 glyph_affine(record),
@@ -833,9 +956,8 @@ fn with_opacity(color: Color, opacity: f64) -> Color {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_glyph(
-    ctx: &mut RenderContext,
-    resources: &mut Resources,
+fn draw_glyph<C: Canvas>(
+    canvas: &mut C,
     run: &RunStyle,
     record: &GlyphRecord,
     affine: Affine,
@@ -851,22 +973,17 @@ fn draw_glyph(
         Affine::new([c[0], c[1], c[2], c[3], 0.0, 0.0])
     };
 
-    ctx.set_paint(color);
-    let builder = ctx
-        .glyph_run(resources, &run.font)
-        .font_size(run.size)
-        .normalized_coords(&run.coords)
-        .glyph_transform(linear)
-        .hint(false);
-    let glyph = std::iter::once(Glyph {
-        id: record.id,
-        x: position.x as f32,
-        y: position.y as f32,
-    });
-    match stroke {
-        Some(()) => builder.stroke_glyphs(glyph),
-        None => builder.fill_glyphs(glyph),
-    }
+    canvas.set_paint(color);
+    canvas.draw_glyph(
+        run,
+        Glyph {
+            id: record.id,
+            x: position.x as f32,
+            y: position.y as f32,
+        },
+        linear,
+        stroke.is_some(),
+    );
 }
 
 /// Bounding box of pixels whose alpha exceeds `threshold`, in pixel coords

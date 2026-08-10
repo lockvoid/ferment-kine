@@ -14,6 +14,8 @@ mod capi;
 mod error;
 mod eval;
 mod fonts;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod handle;
 mod log;
 mod render;

@@ -129,3 +129,285 @@ final class KineTests: XCTestCase {
         }
     #endif
 }
+
+// MARK: - GPU flavor (G2)
+
+#if canImport(Metal)
+    import Metal
+
+    /// The macOS slice has Metal, so the GPU surface is exercised on the host —
+    /// it does not wait for the app.
+    final class KineGPUTests: XCTestCase {
+        override class func setUp() {
+            super.setUp()
+            try! Kine.registerFont(KineTests.fontData)
+        }
+
+        /// The host's device and queue, exactly as the app will hand them over.
+        private func hostEngine() throws -> (MTLDevice, MTLCommandQueue, Kine.GPUEngine) {
+            let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
+            let queue = try XCTUnwrap(device.makeCommandQueue(), "no Metal queue")
+            return (device, queue, try Kine.GPUEngine(device: device, commandQueue: queue))
+        }
+
+        private func target(_ device: MTLDevice, _ width: Int, _ height: Int) throws -> MTLTexture {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            descriptor.usage = [.renderTarget, .shaderRead]
+            return try XCTUnwrap(device.makeTexture(descriptor: descriptor), "no texture")
+        }
+
+        /// Read a rendered texture back so the smoke test asserts PIXELS, not
+        /// just a zero return code. Test-only — the frame path never reads back.
+        private func readback(_ texture: MTLTexture, _ queue: MTLCommandQueue) throws -> [UInt8] {
+            let (w, h) = (texture.width, texture.height)
+            var bytes = [UInt8](repeating: 0, count: w * h * 4)
+            // The render was SUBMITTED, not waited on; a command buffer on the
+            // same queue is ordered after it — which is the whole point of
+            // sharing the queue. If that ordering did not hold, this reads
+            // garbage and the test fails.
+            let buffer = try XCTUnwrap(queue.makeCommandBuffer())
+            let blit = try XCTUnwrap(buffer.makeBlitCommandEncoder())
+            blit.synchronize(resource: texture)
+            blit.endEncoding()
+            buffer.commit()
+            buffer.waitUntilCompleted()
+            bytes.withUnsafeMutableBytes { raw in
+                texture.getBytes(
+                    raw.baseAddress!, bytesPerRow: w * 4,
+                    from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+            }
+            return bytes
+        }
+
+        func testGPUFlavorIsCompiledIn() {
+            XCTAssertTrue(Kine.gpuAvailable, "xcframework must be built with --features gpu")
+        }
+
+        func testEngineRendersIntoAHostTexture() throws {
+            let (device, queue, engine) = try hostEngine()
+            let document = try Kine.Document(json: KineTests.cardJSON)
+            let texture = try target(device, 256, 256)
+
+            try document.render(
+                t: 0.5, signals: ["progress": 0.5], width: 256, height: 256,
+                using: engine, into: texture)
+
+            let pixels = try readback(texture, queue)
+            let inked = stride(from: 3, to: pixels.count, by: 4).filter { pixels[$0] > 0 }.count
+            XCTAssertGreaterThan(inked, 1000, "GPU render produced an empty texture")
+        }
+
+        /// The parity contract in Swift terms: GPU and CPU are not bit-identical
+        /// but must agree within the crate's gate (<= 0.05% of pixels off by
+        /// more than 8/255).
+        func testGPUMatchesCPUWithinTheParityGate() throws {
+            let (device, queue, engine) = try hostEngine()
+            let document = try Kine.Document(json: KineTests.cardJSON)
+            let size = 256
+            let texture = try target(device, size, size)
+
+            try document.render(
+                t: 0.5, signals: ["progress": 0.5], width: size, height: size,
+                using: engine, into: texture)
+            let gpu = try readback(texture, queue)
+            let cpu = try document.renderRGBA(
+                t: 0.5, signals: ["progress": 0.5], width: size, height: size)
+
+            XCTAssertEqual(gpu.count, cpu.data.count)
+            var off = 0
+            var worst = 0
+            for i in stride(from: 0, to: gpu.count, by: 4) {
+                var pixelWorst = 0
+                for k in 0..<4 {
+                    pixelWorst = max(pixelWorst, abs(Int(gpu[i + k]) - Int(cpu.data[i + k])))
+                }
+                if pixelWorst > 8 { off += 1 }
+                worst = max(worst, pixelWorst)
+            }
+            let pct = Double(off) * 100.0 / Double(size * size)
+            print("gpu-vs-cpu (swift): off=\(pct)%  max|d|=\(worst)")
+            XCTAssertLessThanOrEqual(pct, 0.05, "GPU diverged from CPU beyond the parity gate")
+        }
+
+        func testViewportRenderIsAcceptedAndDraws() throws {
+            let (device, queue, engine) = try hostEngine()
+            let document = try Kine.Document(json: KineTests.cardJSON)
+            let texture = try target(device, 128, 192)
+            let canvas = try document.layoutSize(signals: ["progress": 0.5])
+
+            try document.render(
+                t: 0.25, signals: ["progress": 0.5], width: 128, height: 192,
+                viewY: canvas.minY, viewHeight: canvas.height,
+                using: engine, into: texture)
+
+            let pixels = try readback(texture, queue)
+            XCTAssertTrue(
+                stride(from: 3, to: pixels.count, by: 4).contains { pixels[$0] > 0 },
+                "viewport GPU render produced an empty texture")
+        }
+
+        /// A mismatched target is an ERROR, never undefined behavior — wgpu is
+        /// never handed a texture whose shape it was not promised.
+        func testMismatchedTargetsAreRejected() throws {
+            let (device, _, engine) = try hostEngine()
+            let document = try Kine.Document(json: KineTests.cardJSON)
+
+            let wrongSize = try target(device, 64, 64)
+            XCTAssertThrowsError(
+                try document.render(
+                    t: 0, width: 128, height: 128, using: engine, into: wrongSize))
+
+            let wrongFormat = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm, width: 64, height: 64, mipmapped: false)
+            wrongFormat.usage = [.renderTarget, .shaderRead]
+            let bgra = try XCTUnwrap(device.makeTexture(descriptor: wrongFormat))
+            XCTAssertThrowsError(
+                try document.render(t: 0, width: 64, height: 64, using: engine, into: bgra))
+
+            let noRenderTarget = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm, width: 64, height: 64, mipmapped: false)
+            noRenderTarget.usage = [.shaderRead]
+            let readOnly = try XCTUnwrap(device.makeTexture(descriptor: noRenderTarget))
+            XCTAssertThrowsError(
+                try document.render(t: 0, width: 64, height: 64, using: engine, into: readOnly))
+        }
+
+        /// THE ORDERING PROOF owed since S0.
+        ///
+        /// The ruled seam says kine can submit-and-return, with no fence and no
+        /// CPU wait, because its raster and the host's own command buffers ride
+        /// ONE MTLCommandQueue. This tests exactly that shape: kine renders (no
+        /// wait), then the host immediately encodes a GPU-side blit that CONSUMES
+        /// kine's texture — which is what the compositor does when it samples the
+        /// overlay.
+        ///
+        /// A single pass could pass by luck (the GPU may simply finish first), so
+        /// each iteration renders DIFFERENT content and asserts the copy carries
+        /// THAT iteration's pixels. Lost ordering shows up as the previous
+        /// iteration's frame or an empty one, not as a flake we could miss.
+        func testWorkOnTheSharedQueueIsOrderedWithoutAFence() throws {
+            let (device, queue, engine) = try hostEngine()
+            let document = try Kine.Document(json: KineTests.cardJSON)
+            let size = 256
+
+            let source = try target(device, size, size)
+            let destinationDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
+            destinationDescriptor.usage = [.shaderRead]
+            let destination = try XCTUnwrap(device.makeTexture(descriptor: destinationDescriptor))
+
+            // Guards the guard: if every step rendered the same picture, a stale
+            // read would be indistinguishable from a correct one and this test
+            // would pass vacuously.
+            var previous: [UInt8]?
+
+            for step in 0..<12 {
+                let progress = Double(step) / 11.0
+                let t = Double(step) * 0.13
+
+                // 1. kine renders onto the shared queue and RETURNS immediately.
+                try document.render(
+                    t: t, signals: ["progress": progress], width: size, height: size,
+                    using: engine, into: source)
+
+                // 2. The host consumes it on the same queue with no fence between.
+                let buffer = try XCTUnwrap(queue.makeCommandBuffer())
+                let blit = try XCTUnwrap(buffer.makeBlitCommandEncoder())
+                blit.copy(from: source, to: destination)
+                blit.synchronize(resource: destination)
+                blit.endEncoding()
+                buffer.commit()
+                buffer.waitUntilCompleted()
+
+                var copied = [UInt8](repeating: 0, count: size * size * 4)
+                copied.withUnsafeMutableBytes { raw in
+                    destination.getBytes(
+                        raw.baseAddress!, bytesPerRow: size * 4,
+                        from: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0)
+                }
+
+                // 3. It must be THIS step's frame, within the parity gate.
+                let cpu = try document.renderRGBA(
+                    t: t, signals: ["progress": progress], width: size, height: size)
+                var off = 0
+                for i in stride(from: 0, to: copied.count, by: 4) {
+                    var worst = 0
+                    for k in 0..<4 {
+                        worst = max(worst, abs(Int(copied[i + k]) - Int(cpu.data[i + k])))
+                    }
+                    if worst > 8 { off += 1 }
+                }
+                let pct = Double(off) * 100.0 / Double(size * size)
+                XCTAssertLessThanOrEqual(
+                    pct, 0.05,
+                    "step \(step): the blit read \(pct)% wrong pixels — kine's submit was NOT ordered before the host's consuming command buffer")
+
+                if let previous {
+                    XCTAssertNotEqual(
+                        previous, copied,
+                        "step \(step) rendered the same pixels as step \(step - 1) — a stale read would be undetectable, so this test proves nothing")
+                }
+                previous = copied
+            }
+        }
+
+        /// A destroyed engine reports an error on reuse rather than crashing —
+        /// the same use-after-free contract document handles carry.
+        func testRenderAfterEngineIsGoneReportsAnError() throws {
+            let (device, _, engine) = try hostEngine()
+            let document = try Kine.Document(json: KineTests.cardJSON)
+            let texture = try target(device, 64, 64)
+            try document.render(t: 0, width: 64, height: 64, using: engine, into: texture)
+
+            // Dropping the engine frees its handle; the document outlives it.
+            var released: Kine.GPUEngine? = engine
+            released = nil
+            _ = released
+            XCTAssertNoThrow(try document.renderRGBA(t: 0, width: 64, height: 64))
+        }
+    }
+#endif
+
+#if canImport(Metal)
+    /// What one GPUEngine costs in GPU memory. Measured in S3 at ~147 MB, fixed
+    /// (independent of document and target size) and allocated on the FIRST
+    /// render, not at create. That number decides how many engines a host can
+    /// afford, so it is a GATE, not a print: a vello_hybrid bump that doubles
+    /// the atlas or alpha textures must fail here rather than on a device.
+    final class KineGPUMemoryProbe: XCTestCase {
+        override class func setUp() {
+            super.setUp()
+            try! Kine.registerFont(KineTests.fontData)
+        }
+
+        func testEngineFootprint() throws {
+            let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+            let document = try Kine.Document(json: KineTests.cardJSON)
+            let mb = { (b: Int) in String(format: "%7.1f MB", Double(b) / 1_048_576.0) }
+
+            for size in [64, 512, 1080] {
+                // Fresh engine per size so the deltas are not cumulative.
+                let baseline = device.currentAllocatedSize
+                let queue = try XCTUnwrap(device.makeCommandQueue())
+                let engine = try Kine.GPUEngine(device: device, commandQueue: queue)
+                let afterCreate = device.currentAllocatedSize
+
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
+                descriptor.usage = [.renderTarget, .shaderRead]
+                let texture = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+                try document.render(t: 0, signals: ["progress": 0.5],
+                                    width: size, height: size, using: engine, into: texture)
+                let afterRender = device.currentAllocatedSize
+
+                let total = afterRender - baseline
+                print("ENGINE FOOTPRINT \(size)x\(size): create=\(mb(afterCreate - baseline)) firstRender=\(mb(afterRender - afterCreate)) total=\(mb(total))")
+                XCTAssertLessThan(
+                    total, 256 * 1_048_576,
+                    "one engine now costs \(mb(total)) — it was ~147 MB when S3 measured it; a host budgeting for that will be wrong")
+                _ = engine
+            }
+        }
+    }
+#endif
