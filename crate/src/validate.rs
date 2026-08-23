@@ -1206,28 +1206,28 @@ fn check_value_mapping(
 
 // --- colors ---------------------------------------------------------------------
 
+/// Any CSS color: a name (`white`, `darkslategray`), `#rgb`, `#rgba`,
+/// `#rrggbb`, `#rrggbbaa`, `rgb()/rgba()`, `hsl()`, `oklch()` — whatever the
+/// `color` crate's own parser accepts.
+///
+/// It used to be a hand-rolled hex slicer taking exactly `#rrggbb` and
+/// `#rrggbbaa`. That is the one format with a trap in it: eight hex digits do
+/// not say where the alpha byte lives, and an author who writes `#ff3e2723`
+/// meaning opaque dark brown gets a near-transparent orange instead — no
+/// error, just the wrong picture. Names and six-digit hex have no such
+/// ambiguity, so the cure is to accept the whole CSS surface rather than to
+/// document the trap.
 pub fn parse_color(text: &str) -> Option<AlphaColor<Srgb>> {
-    let hex = text.strip_prefix('#')?;
-    let (r, g, b, a) = match hex.len() {
-        6 => (
-            u8::from_str_radix(&hex[0..2], 16).ok()?,
-            u8::from_str_radix(&hex[2..4], 16).ok()?,
-            u8::from_str_radix(&hex[4..6], 16).ok()?,
-            255,
-        ),
-        8 => (
-            u8::from_str_radix(&hex[0..2], 16).ok()?,
-            u8::from_str_radix(&hex[2..4], 16).ok()?,
-            u8::from_str_radix(&hex[4..6], 16).ok()?,
-            u8::from_str_radix(&hex[6..8], 16).ok()?,
-        ),
-        _ => return None,
-    };
-    Some(AlphaColor::from_rgba8(r, g, b, a))
+    color::parse_color(text.trim())
+        .ok()
+        .map(|color| color.to_alpha_color::<Srgb>())
 }
 
 fn malformed_color(text: &str) -> String {
-    format!("malformed color \"{text}\" (expected #RRGGBB or #RRGGBBAA)")
+    format!(
+        "malformed color \"{text}\" (expected a CSS color: a name like \"white\", \
+         #rgb / #rrggbb / #rrggbbaa with alpha LAST, or rgb()/hsl()/oklch())"
+    )
 }
 
 // --- spring baking ----------------------------------------------------------------

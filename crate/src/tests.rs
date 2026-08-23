@@ -1283,6 +1283,45 @@ fn time_wraps_exactly_at_period_multiples() {
 
 const COLORS_DERIVATION: &str = include_str!("../tests/fixtures/colors_derivation.json");
 
+/// Eight hex digits do not say where the alpha byte lives, and an author who
+/// writes ARGB gets a silently wrong picture rather than an error. The cure is
+/// that nobody has to write eight digits: every unambiguous CSS spelling is
+/// accepted, so "dark brown" is `darkbrown`, `#3e2723` or `#3e2723ff` — never
+/// a guess about byte order.
+#[test]
+fn any_css_color_spelling_parses() {
+    let parse = crate::validate::parse_color;
+    let opaque_dark_brown = parse("#3e2723ff").unwrap();
+
+    for spelling in ["#3E2723", "#3e2723", "#3e2723ff", "rgb(62, 39, 35)", "rgba(62, 39, 35, 1)"] {
+        let color = parse(spelling).unwrap_or_else(|| panic!("{spelling} did not parse"));
+        for channel in 0..4 {
+            assert!(
+                (color.components[channel] - opaque_dark_brown.components[channel]).abs() < 1e-3,
+                "{spelling} channel {channel}"
+            );
+        }
+    }
+
+    // A NAME is what a person says and what a model reaches for first.
+    let white = parse("white").unwrap();
+    assert!((white.components[0] - 1.0).abs() < 1e-6);
+    assert!((white.components[3] - 1.0).abs() < 1e-6);
+    assert!(parse("darkslategray").is_some(), "the x11 palette is in scope");
+
+    // Short form, and the same value with an alpha nibble.
+    let short = parse("#fff").unwrap();
+    assert!((short.components[0] - 1.0).abs() < 1e-6);
+    assert!((short.components[3] - 1.0).abs() < 1e-6);
+    let half = parse("#ffff0080").unwrap();
+    assert!((half.components[3] - 0.5).abs() < 0.01, "alpha is the LAST byte");
+
+    // Still refused: the shapes that mean nothing.
+    for junk in ["", "  ", "#", "#12345", "not-a-color", "0x3e2723", "#3e2723f"] {
+        assert!(parse(junk).is_none(), "{junk:?} must not parse");
+    }
+}
+
 #[test]
 fn color_alpha_is_absolute() {
     let red = crate::validate::parse_color("#FF0000").unwrap();

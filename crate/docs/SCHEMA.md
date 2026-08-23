@@ -54,7 +54,7 @@ a document with no supplied signals renders its designed look.
 | `time`       | number ≥ 0, seconds                | idle loops; see animator `period`|
 | `number`     | number, optional `min`/`max` clamp |                                  |
 | `string`     | string                             |                                  |
-| `color`      | `#RRGGBB` or `#RRGGBBAA`           |                                  |
+| `color`      | any CSS color (see below)          | a name, hex, `rgb()`, `hsl()`, … |
 | `enum`       | one of declared `values`           |                                  |
 | `fontFamily` | string                             | resolved against registered fonts|
 
@@ -91,7 +91,10 @@ every platform — never host-side color math.
 
 - Entry `key`: `[a-z][a-zA-Z0-9]*`, unique across the table.
 - `value` grammar — one of:
-  - literal `#RRGGBB` / `#RRGGBBAA`
+  - a literal CSS color: a name (`white`, `darkslategray`), `#RGB` / `#RGBA` /
+    `#RRGGBB` / `#RRGGBBAA` — **alpha LAST**, so opaque dark brown is
+    `#3E2723FF` and never `#FF3E2723` — or a function (`rgb()`, `rgba()`,
+    `hsl()`, `oklch()`, …)
   - `{ "input": "<color input key>" }`
   - `{ "fn": "alpha", "of": ref, "amount": 0..1 }` — replaces alpha
   - `{ "fn": "contrast", "of": ref }` — `#000000` or `#FFFFFF`, whichever
