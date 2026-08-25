@@ -1283,6 +1283,66 @@ fn time_wraps_exactly_at_period_multiples() {
 
 const COLORS_DERIVATION: &str = include_str!("../tests/fixtures/colors_derivation.json");
 
+/// A refusal has to name the node, the field and what was expected. Under
+/// `#[serde(untagged)]` it named none of them: an agent authoring a title card
+/// carried the SHAPE spelling of `fill` (`{"kind":"solid",…}`) into a TEXT
+/// style, was told only "root: data did not match any variant of untagged enum
+/// Raw", and spent thirteen consecutive calls guessing — finally "succeeding"
+/// by deleting the title from the card.
+#[test]
+fn a_color_refusal_names_the_path_and_what_was_expected() {
+    let doc = r##"{
+        "version": 1, "size": {"width": 1080, "height": 1920},
+        "inputs": [], "colors": [{"key": "fg", "value": "#ffffffff"}],
+        "assets": [], "animators": [],
+        "root": {"kind": "group", "key": "root", "children": [
+            {"kind": "text", "key": "title", "content": "DESERT",
+             "frame": {"x": 0, "y": 740, "width": 1080, "height": 440},
+             "style": {"fontFamily": "Inter", "size": 160,
+                       "fill": {"kind": "solid", "color": {"color": "fg"}}}}
+        ]}
+    }"##;
+
+    let error = crate::schema::parse(doc).expect_err("a paint object is not a text fill");
+    let message = error.to_string();
+
+    // What the message must carry: the offending KEY, the shapes that are
+    // accepted, and where the spelling the author used does belong.
+    assert!(message.contains("\"kind\""), "names the offending key, got: {message}");
+    assert!(message.contains("color") && message.contains("input"),
+            "names what a text fill takes, got: {message}");
+    assert!(message.contains("SHAPE"),
+            "says where the paint spelling belongs instead, got: {message}");
+    assert!(!message.contains("untagged"),
+            "no serde internals in an authoring message, got: {message}");
+
+    // KNOWN GAP, not an accident: the path stops at `root` rather than
+    // `root.children[0].style.fill`, because `Node` is `#[serde(tag = "kind")]`
+    // and an internally-tagged enum buffers its content — which is exactly
+    // what drops `serde_path_to_error`'s trail. Naming the node needs `Node`
+    // hand-visited too; until then the message says WHAT is wrong without
+    // saying WHICH node.
+    assert!(message.contains("root"), "points into the document, got: {message}");
+}
+
+/// The same treatment for the leaf a colors ENTRY takes.
+#[test]
+fn a_color_ref_refusal_names_what_it_takes() {
+    let doc = r#"{
+        "version": 1, "size": {"width": 1080, "height": 1920},
+        "inputs": [], "assets": [], "animators": [],
+        "colors": [{"key": "fg", "value": {"fn": "alpha", "of": {"nope": 1}, "amount": 0.5}}],
+        "root": {"kind": "group", "key": "root", "children": []}
+    }"#;
+
+    let message = crate::schema::parse(doc)
+        .expect_err("an unknown binding key is not a color ref")
+        .to_string();
+
+    assert!(message.contains("colors[0]"), "names the entry, got: {message}");
+    assert!(!message.contains("untagged"), "no serde internals, got: {message}");
+}
+
 /// Eight hex digits do not say where the alpha byte lives, and an author who
 /// writes ARGB gets a silently wrong picture rather than an error. The cure is
 /// that nobody has to write eight digits: every unambiguous CSS spelling is

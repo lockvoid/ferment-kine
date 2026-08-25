@@ -296,6 +296,59 @@ impl<'de> Deserialize<'de> for ColorExpr {
     }
 }
 
+/// A leaf that is either a STRING or a one-key binding object.
+///
+/// Hand-visited because `#[serde(untagged)]` buffers the value: it discards
+/// the path `serde_path_to_error` was tracking AND every per-variant message,
+/// leaving an author with `root: data did not match any variant of untagged
+/// enum Raw` — a sentence that names no node, no field and no expectation.
+/// A visitor keeps both, so the refusal reads like an instruction.
+struct OneOfVisitor<'a, T> {
+    expecting: &'a str,
+    on_str: &'a dyn Fn(String) -> T,
+    keys: &'a [&'a str],
+    on_key: &'a dyn Fn(&str, String) -> Option<T>,
+}
+
+impl<'de, 'a, T> serde::de::Visitor<'de> for OneOfVisitor<'a, T> {
+    type Value = T;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str(self.expecting)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<T, E> {
+        Ok((self.on_str)(value.to_owned()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<T, E> {
+        Ok((self.on_str)(value))
+    }
+
+    fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<T, M::Error> {
+        use serde::de::Error as _;
+
+        let Some(key) = map.next_key::<String>()? else {
+            return Err(M::Error::custom(format!("empty object — expected {}", self.expecting)));
+        };
+        let value: String = map.next_value()?;
+        let parsed = (self.on_key)(&key, value).ok_or_else(|| {
+            M::Error::custom(format!(
+                "unknown key \"{key}\" (expected {}) — {}",
+                self.keys.join(" or "),
+                self.expecting
+            ))
+        })?;
+        if let Some(extra) = map.next_key::<String>()? {
+            return Err(M::Error::custom(format!(
+                "extra key \"{extra}\" — {}",
+                self.expecting
+            )));
+        }
+        Ok(parsed)
+    }
+}
+
 /// A color-function argument: literal `#…`, input binding, or the string key of
 /// an EARLIER table entry.
 #[derive(Debug, Clone)]
@@ -307,16 +360,21 @@ pub enum ColorRef {
 
 impl<'de> Deserialize<'de> for ColorRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Str(String),
-            Input(InputRef),
-        }
-        Ok(match Raw::deserialize(deserializer)? {
-            Raw::Str(s) if s.starts_with('#') => ColorRef::Literal(s),
-            Raw::Str(s) => ColorRef::Entry(s),
-            Raw::Input(r) => ColorRef::Input(r.input),
+        // Visited by hand rather than `#[serde(untagged)]`: untagged buffers
+        // the value, which throws away BOTH the path serde_path_to_error was
+        // tracking and every per-variant message. An author then reads
+        // "root: data did not match any variant of untagged enum Raw" and has
+        // no idea which node, which field, or what was expected — the exact
+        // wall an agent hit thirteen times in a row on 2026-08-23.
+        deserializer.deserialize_any(OneOfVisitor {
+            expecting: "a color: \"#rrggbbaa\" or a CSS name, the key of an EARLIER \
+                        colors entry, or {\"input\": \"<color input key>\"}",
+            on_str: &|s: String| if s.starts_with('#') { ColorRef::Literal(s) } else { ColorRef::Entry(s) },
+            keys: &["input"],
+            on_key: &|key: &str, value: String| match key {
+                "input" => Some(ColorRef::Input(value)),
+                _ => None,
+            },
         })
     }
 }
@@ -332,24 +390,21 @@ pub enum ColorValue {
 
 impl<'de> Deserialize<'de> for ColorValue {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Str(String),
-            Obj(Obj),
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        enum Obj {
-            #[serde(rename = "input")]
-            Input(String),
-            #[serde(rename = "color")]
-            Color(String),
-        }
-        Ok(match Raw::deserialize(deserializer)? {
-            Raw::Str(s) => ColorValue::Literal(s),
-            Raw::Obj(Obj::Input(k)) => ColorValue::Input(k),
-            Raw::Obj(Obj::Color(k)) => ColorValue::Color(k),
+        // A text style's `fill` is a COLOR — this type. A shape's `fill` is a
+        // PAINT (`{"kind":"solid","color":…}`). One word, two meanings, and an
+        // author who carries the shape spelling into a text style used to be
+        // told only "data did not match any variant of untagged enum Raw".
+        deserializer.deserialize_any(OneOfVisitor {
+            expecting: "a color: \"#rrggbbaa\" or a CSS name, {\"color\": \"<colors entry key>\"}, \
+                        or {\"input\": \"<color input key>\"} — \
+                        {\"kind\":\"solid\",…} belongs on a SHAPE's fill, not on a text style's",
+            on_str: &ColorValue::Literal,
+            keys: &["color", "input"],
+            on_key: &|key: &str, value: String| match key {
+                "color" => Some(ColorValue::Color(value)),
+                "input" => Some(ColorValue::Input(value)),
+                _ => None,
+            },
         })
     }
 }
