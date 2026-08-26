@@ -45,6 +45,21 @@ final class KineTests: XCTestCase {
             ["time", "progress", "activations", "font", "foreground", "background", "accent", "borderColor"])
     }
 
+    func testProbeManifestsReferencedAndMissingFonts() throws {
+        // The card's text binds `fontFamily` to the "font" input, whose default
+        // is the registered test face — referenced, nothing missing.
+        let document = try Kine.Document(json: Self.cardJSON)
+        let probe = try document.probe()
+        XCTAssertEqual(probe.fonts, ["Bebas Neue"])
+        XCTAssertEqual(probe.missingFonts, [])
+
+        let restyled = Self.cardJSON.replacingOccurrences(
+            of: "Bebas Neue", with: "Missing Grotesk")
+        let missing = try Kine.Document(json: restyled).probe()
+        XCTAssertEqual(missing.fonts, ["Missing Grotesk"])
+        XCTAssertEqual(missing.missingFonts, ["Missing Grotesk"])
+    }
+
     func testRenderRGBADiffersBySignals() throws {
         let document = try Kine.Document(json: Self.cardJSON)
         let a = try document.renderRGBA(t: 0, signals: ["progress": 0.0], width: 128, height: 128)

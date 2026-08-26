@@ -103,6 +103,21 @@ fn register_into(reg: &mut Registry, bytes: &[u8]) -> Result<usize, String> {
     Ok(count)
 }
 
+/// Of `families`, the ones the registered collection cannot serve — the
+/// probe's `missingFonts`. Resolution matches the render path
+/// (`collection.family_id` by name); an empty registry reports every family
+/// missing. Order follows the input.
+pub fn missing(families: &[String]) -> Vec<String> {
+    let Some(mut ctx) = context() else {
+        return families.to_vec();
+    };
+    families
+        .iter()
+        .filter(|family| ctx.collection.family_id(family).is_none())
+        .cloned()
+        .collect()
+}
+
 /// A `FontContext` seeded with the registered collection. `None` when no font
 /// has been registered yet. Families are resolved by name from the document.
 pub fn context() -> Option<FontContext> {

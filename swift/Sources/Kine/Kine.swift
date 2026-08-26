@@ -90,9 +90,16 @@ public enum Kine {
         public let inputs: [Input]
         public let roles: [String]
         public let assets: [Asset]
+        /// Font families the document references (literal `style.fontFamily`
+        /// values + the defaults of `fontFamily` inputs a style binds to), in
+        /// document order, deduped.
+        public let fonts: [String]
+        /// Of `fonts`, the families the process registry cannot serve at probe
+        /// time — fetch and register exactly these before rendering.
+        public let missingFonts: [String]
 
         private enum CodingKeys: String, CodingKey {
-            case version, size, inputs, roles, assets
+            case version, size, inputs, roles, assets, fonts, missingFonts
         }
 
         public init(from decoder: Decoder) throws {
@@ -103,6 +110,8 @@ public enum Kine {
             roles = try container.decode([String].self, forKey: .roles)
             // Optional-safe: docs probed by an older core (pre-manifest) omit it.
             assets = try container.decodeIfPresent([Asset].self, forKey: .assets) ?? []
+            fonts = try container.decodeIfPresent([String].self, forKey: .fonts) ?? []
+            missingFonts = try container.decodeIfPresent([String].self, forKey: .missingFonts) ?? []
         }
     }
 

@@ -10,7 +10,8 @@ require "kine"
 Kine.register_font(File.binread("Inter.ttf"))
 png = Kine.render_document(doc, t: 0.5, signals: { progress: 0.5 },
                            width: 512, height: 512)   # binary PNG String
-Kine.probe(doc)  # => { "version" => 1, "size" => {...}, "inputs" => [...], "roles" => [...] }
+Kine.probe(doc)  # => { "version" => 1, "size" => {...}, "inputs" => [...], "roles" => [...],
+                 #      "assets" => [...], "fonts" => [...], "missingFonts" => [...] }
 ```
 
 ## Install

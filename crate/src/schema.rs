@@ -1019,6 +1019,47 @@ pub enum Hue {
     Decreasing,
 }
 
+// --- font manifest ---------------------------------------------------------------
+
+/// Font families the document references: literal `style.fontFamily` values
+/// plus the defaults of the `fontFamily` inputs a style binds to — the probe's
+/// `fonts` manifest, in document order, deduped. A static schema walk: no
+/// registry, no render.
+pub fn referenced_fonts(doc: &Document) -> Vec<String> {
+    fn walk(node: &Node, doc: &Document, out: &mut Vec<String>) {
+        match node {
+            Node::Group(group) => {
+                for child in &group.children {
+                    walk(child, doc, out);
+                }
+            }
+            Node::Text(text) => {
+                let family = match &text.style.font_family {
+                    Bindable::Literal(name) => Some(name.clone()),
+                    // Validation (`check_binding_font`) guarantees the binding
+                    // names a declared `fontFamily` input, so the lookup only
+                    // misses on a non-validated document — then there is no
+                    // family to manifest.
+                    Bindable::Input(key) => doc.inputs.iter().find_map(|input| match input {
+                        Input::FontFamily(i) if i.key == *key => Some(i.default.clone()),
+                        _ => None,
+                    }),
+                };
+                if let Some(name) = family {
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
+            Node::Shape(_) | Node::Image(_) => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&doc.root, doc, &mut out);
+    out
+}
+
 // --- duplicate-key rejection ---------------------------------------------------
 
 /// serde_json is silently last-wins on duplicate object keys; the schema says

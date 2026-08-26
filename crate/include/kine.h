@@ -66,7 +66,8 @@ kine_buf kine_render_document_rgba(const char *doc_json, double t,
                                    uint32_t height);
 
 /* Parse + validate a document and describe its interface as JSON:
- * { "version", "size", "inputs": [...], "roles": [...] }. */
+ * { "version", "size", "inputs": [...], "roles": [...], "assets": [...],
+ *   "fonts": [...], "missingFonts": [...] }. */
 kine_buf kine_probe(const char *doc_json);
 
 /* ---- handles (parse once; render every frame) ---------------------------- */

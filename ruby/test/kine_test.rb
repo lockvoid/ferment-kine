@@ -56,6 +56,18 @@ class KineTest < Minitest::Test
     assert_equal({ "width" => 512, "height" => 512 }, interface["size"])
   end
 
+  def test_probe_manifests_referenced_and_missing_fonts
+    interface = Kine.probe(FIXTURE)
+    assert_equal ["Bebas Neue"], interface["fonts"]
+    assert_equal [], interface["missingFonts"]
+
+    restyled = JSON.parse(FIXTURE)
+    restyled["inputs"].find { |i| i["key"] == "font" }["default"] = "Missing Grotesk"
+    interface = Kine.probe(restyled)
+    assert_equal ["Missing Grotesk"], interface["fonts"]
+    assert_equal ["Missing Grotesk"], interface["missingFonts"]
+  end
+
   def test_schema_error_carries_the_failing_path
     invalid = JSON.parse(FIXTURE)
     invalid["animators"][0]["target"] = "nope.glyphs"

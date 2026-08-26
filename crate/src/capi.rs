@@ -117,7 +117,8 @@ pub extern "C" fn kine_render_document_rgba(
 }
 
 /// Parse + validate a document and describe its interface:
-/// `{ "version", "size", "inputs": [...], "roles": [...] }`. The first
+/// `{ "version", "size", "inputs": [...], "roles": [...], "assets": [...],
+/// "fonts": [...], "missingFonts": [...] }`. The first
 /// schema/validation error is reported through the error channel.
 #[no_mangle]
 pub extern "C" fn kine_probe(doc_json: *const c_char) -> kine_buf {
@@ -406,12 +407,22 @@ fn interface_json(compiled: &crate::validate::Compiled) -> serde_json::Value {
         })
         .collect();
 
+    // Font manifest: which families the document references, and which of
+    // them the process registry cannot serve RIGHT NOW. `fonts` is static
+    // truth a host can validate against its catalog at the write seam;
+    // `missingFonts` is registry state, so a host that registers lazily can
+    // fetch exactly what a document needs before rendering it.
+    let fonts = crate::schema::referenced_fonts(&compiled.doc);
+    let missing = fonts::missing(&fonts);
+
     json!({
         "version": compiled.doc.version,
         "size": { "width": compiled.doc.size.width, "height": compiled.doc.size.height },
         "inputs": inputs,
         "roles": compiled.roles,
         "assets": assets,
+        "fonts": fonts,
+        "missingFonts": missing,
     })
 }
 

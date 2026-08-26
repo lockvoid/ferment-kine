@@ -299,6 +299,47 @@ fn probe_accepts_the_minimal_document() {
     assert_eq!(interface["roles"], serde_json::json!([]));
 }
 
+// --- fonts surface: probe manifest + loud failures ---------------------------
+
+/// Three text nodes: a literal family the test font provides, a binding whose
+/// `fontFamily` input default names an unavailable family, and a literal
+/// duplicate — probe must manifest the referenced families (doc order,
+/// deduped) and which of them the registry cannot serve.
+const FONTED: &str = r##"{
+  "version": 1,
+  "size": {"width": 320, "height": 240},
+  "inputs": [{"key": "face", "type": "fontFamily", "default": "Missing Grotesk"}],
+  "root": {"kind": "group", "key": "root", "children": [
+    {"kind": "text", "key": "a", "content": "ALPHA",
+     "frame": {"x": 0, "y": 0, "width": 320, "height": 80},
+     "style": {"fontFamily": "Bebas Neue", "size": 40, "fill": "#FFFFFF"}},
+    {"kind": "text", "key": "b", "content": "BETA",
+     "frame": {"x": 0, "y": 80, "width": 320, "height": 80},
+     "style": {"fontFamily": {"input": "face"}, "size": 40, "fill": "#FFFFFF"}},
+    {"kind": "text", "key": "c", "content": "GAMMA",
+     "frame": {"x": 0, "y": 160, "width": 320, "height": 80},
+     "style": {"fontFamily": "Bebas Neue", "size": 40, "fill": "#FFFFFF"}}
+  ]}
+}"##;
+
+#[test]
+fn probe_reports_referenced_and_missing_fonts() {
+    register_font(); // "Bebas Neue" is servable
+    let interface = probe(FONTED).unwrap_or_else(|| panic!("probe failed: {}", last_error()));
+    assert_eq!(
+        interface["fonts"],
+        serde_json::json!(["Bebas Neue", "Missing Grotesk"])
+    );
+    assert_eq!(interface["missingFonts"], serde_json::json!(["Missing Grotesk"]));
+}
+
+#[test]
+fn probe_reports_no_fonts_for_a_textless_document() {
+    let interface = probe(MINIMAL).unwrap_or_else(|| panic!("probe failed: {}", last_error()));
+    assert_eq!(interface["fonts"], serde_json::json!([]));
+    assert_eq!(interface["missingFonts"], serde_json::json!([]));
+}
+
 // --- rendering ----------------------------------------------------------------------
 
 /// Two words on one line with a translucent BACKDROP and a zero-base-opacity
