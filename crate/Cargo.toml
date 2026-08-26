@@ -13,7 +13,7 @@ repository = "https://github.com/lockvoid/ferment-kine"
 name = "kine"
 # cdylib: loaded by FFI language bindings. staticlib: linked into native apps.
 # One extern-C surface (include/kine.h) serves both.
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [profile.release]
 # Required for catch_unwind at the FFI boundary — a panic must be caught and

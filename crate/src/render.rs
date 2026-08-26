@@ -467,13 +467,49 @@ fn build_text_layout(text: &RText) -> Result<Layout<()>, String> {
             style.family
         ));
     };
-    if font_ctx.collection.family_id(&style.family).is_none() {
-        return Err(format!("font family not registered: \"{}\"", style.family));
+    let family = style.family.as_str();
+    if font_ctx.collection.family_id(family).is_none() {
+        // The host-declared escalation: with a fallback family the frame
+        // still renders (WARNED once per family through the sink); without
+        // one a missing family is a hard render error — the strict mode
+        // probes, goldens and the write seams rely on.
+        match crate::fonts::fallback() {
+            Some(ref fallback) if font_ctx.collection.family_id(fallback).is_some() => {
+                warn_fallback_once(&style.family, fallback);
+                return build_layout(&mut font_ctx, text, fallback);
+            }
+            _ => return Err(format!("font family not registered: \"{}\"", style.family)),
+        }
     }
+    build_layout(&mut font_ctx, text, family)
+}
+
+/// One WARN per missing family per process — a paused preview re-renders at
+/// 30 Hz and must not turn the sink into a metronome.
+fn warn_fallback_once(family: &str, fallback: &str) {
+    use std::sync::Mutex;
+    static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap_or_else(|poison| poison.into_inner());
+    if warned.iter().any(|w| w == family) {
+        return;
+    }
+    warned.push(family.to_string());
+    crate::log::emit(
+        crate::log::WARN,
+        &format!("font family not registered: \"{family}\" — falling back to \"{fallback}\""),
+    );
+}
+
+fn build_layout(
+    font_ctx: &mut parley::FontContext,
+    text: &RText,
+    family: &str,
+) -> Result<Layout<()>, String> {
+    let style = &text.style;
     let mut layout_ctx: LayoutContext<()> = LayoutContext::new();
-    let mut builder = layout_ctx.ranged_builder(&mut font_ctx, &text.content, 1.0, true);
+    let mut builder = layout_ctx.ranged_builder(font_ctx, &text.content, 1.0, true);
     builder.push_default(StyleProperty::FontSize(style.size));
-    builder.push_default(FontFamily::named(&style.family));
+    builder.push_default(FontFamily::named(family));
     builder.push_default(StyleProperty::FontWeight(FontWeight::new(style.weight)));
     builder.push_default(StyleProperty::FontStyle(if style.italic {
         FontStyle::Italic

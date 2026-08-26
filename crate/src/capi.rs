@@ -81,6 +81,33 @@ pub extern "C" fn kine_register_font(bytes: *const u8, len: usize) -> i32 {
     }
 }
 
+/// Declare the render-fallback family (levels: strict vs degrade). With a
+/// fallback set, a document naming an unregistered family still renders —
+/// its text shaped by the fallback, WARNED once per family through the log
+/// sink. Without one (the default), a missing family is a hard render error.
+/// The write seams (probe `missingFonts`) stay strict either way. The name
+/// must already resolve in the collection (the embedded "Inter" always
+/// does); empty string clears back to strict. 0 on success, -1 on error.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn kine_set_fallback_family(name: *const c_char) -> i32 {
+    error::clear();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        fonts::set_fallback(cstr(name, "family")?)
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) => {
+            error::set(message);
+            -1
+        }
+        Err(_) => {
+            error::set("panic in kine_set_fallback_family");
+            -1
+        }
+    }
+}
+
 /// Render a v1 motion document at time `t` with the given signals into PNG
 /// bytes (straight alpha). `t` is sugar for the document's `time` input; an
 /// explicit `time` signal wins. Parsing/validation is strict; signal supply is

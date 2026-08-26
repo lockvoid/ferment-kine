@@ -44,6 +44,15 @@ void kine_set_log_callback(void (*callback)(int32_t level, const char *message))
  * Returns 0 on success, -1 on error (see kine_last_error). Idempotent. */
 int32_t kine_register_font(const uint8_t *bytes, size_t len);
 
+/* Declare the render-fallback family: with one set, a document naming an
+ * unregistered family still renders (text shaped by the fallback, WARNED once
+ * per family through the log sink); without one a missing family is a hard
+ * render error. Probe `missingFonts` stays strict either way. The name must
+ * already resolve (the embedded "Inter" always does); "" clears back to
+ * strict. Returns 0, or -1 (see kine_last_error). */
+int32_t kine_set_fallback_family(const char *name);
+
+
 /* Crate + schema version, e.g. "kine 0.1.0 (schema v1)". Static; never freed. */
 const char *kine_version(void);
 

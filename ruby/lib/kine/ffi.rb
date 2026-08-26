@@ -40,6 +40,7 @@ module Kine
     LIBRARY_PATH = resolved
 
     attach_function :kine_register_font, [:pointer, :size_t], :int32
+    attach_function :kine_set_fallback_family, [:pointer], :int32
     # blocking: renders can be long; release the GVL so other Ruby threads run.
     attach_function :kine_render_document,
                     [:pointer, :double, :pointer, :uint32, :uint32],

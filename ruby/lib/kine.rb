@@ -29,6 +29,16 @@ module Kine
     true
   end
 
+  # Declare the render-fallback family: a document naming an unregistered
+  # family renders in it (WARNED once through the log sink) instead of
+  # raising. '' clears back to strict — the default, and what probe
+  # validation relies on.
+  def set_fallback_family(name)
+    code = FFI.kine_set_fallback_family(cstring(name))
+    raise Error, last_error if code != 0
+    true
+  end
+
   # Render a document at time `t` with `signals` → binary PNG String.
   # `doc`/`signals` may be a Hash (JSON-encoded here) or a raw JSON String.
   def render_document(doc, t:, width:, height:, signals: {})

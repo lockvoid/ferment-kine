@@ -28,6 +28,10 @@ struct Registry {
     /// Registered family names, in registration order. The phase-0 test card
     /// renders with the first one.
     families: Vec<String>,
+    /// The host-declared render fallback. `None` = strict: a missing family
+    /// is a hard render error. Declaring one softens RENDER only — the write
+    /// seams (probe `missingFonts`) stay strict either way.
+    fallback: Option<String>,
 }
 
 static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
@@ -40,6 +44,7 @@ fn registry() -> &'static RwLock<Registry> {
                 system_fonts: false,
             }),
             families: Vec::new(),
+            fallback: None,
         };
         // Embedded default. Known-good bytes — a failure here would be a
         // build corruption; surface it through the log sink, never a panic
@@ -101,6 +106,30 @@ fn register_into(reg: &mut Registry, bytes: &[u8]) -> Result<usize, String> {
         }
     }
     Ok(count)
+}
+
+/// Declare the render-fallback family. Verified against the collection AT
+/// DECLARATION — a host typo fails loudly here, never silently per frame.
+/// The embedded default ("Inter") always resolves. Empty name clears back
+/// to strict.
+pub fn set_fallback(name: &str) -> Result<(), String> {
+    let mut reg = registry()
+        .write()
+        .map_err(|_| "font registry lock poisoned".to_string())?;
+    if name.is_empty() {
+        reg.fallback = None;
+        return Ok(());
+    }
+    if reg.collection.family_id(name).is_none() {
+        return Err(format!("fallback family not registered: \"{name}\""));
+    }
+    reg.fallback = Some(name.to_string());
+    Ok(())
+}
+
+/// The declared render-fallback family, if any.
+pub fn fallback() -> Option<String> {
+    registry().read().ok()?.fallback.clone()
 }
 
 /// Of `families`, the ones the registered collection cannot serve — the

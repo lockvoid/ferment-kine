@@ -18,6 +18,7 @@ mod fonts;
 mod gpu;
 mod handle;
 mod log;
+pub mod oneshot;
 mod render;
 mod schema;
 mod validate;

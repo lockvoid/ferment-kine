@@ -59,6 +59,16 @@ public enum Kine {
         if code != 0 { throw KineError.current("font registration failed") }
     }
 
+    /// Declare the render-fallback family: a document naming an unregistered
+    /// family renders in it (WARNED once per family through the log sink)
+    /// instead of failing the frame. Empty string clears back to strict.
+    /// The name must already resolve — the embedded "Inter" always does.
+    /// The write seams (probe `missingFonts`) stay strict either way.
+    public static func setFallbackFamily(_ name: String) throws {
+        let code = name.withCString { kine_set_fallback_family($0) }
+        if code != 0 { throw KineError.current("fallback family rejected") }
+    }
+
     /// Crate + schema version, e.g. "kine 0.1.0 (schema v1)".
     public static var version: String { String(cString: kine_version()) }
 

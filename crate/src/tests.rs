@@ -733,6 +733,9 @@ fn log_sink_hears_font_registrations_and_errors() {
 
 #[test]
 fn unregistered_font_family_is_a_render_error() {
+    // Shares the sink lock with the fallback test: the fallback is
+    // process-global, and this test's contract is the STRICT half.
+    let _sink = lock_log_sink();
     register_font();
     let doc = r##"{ "version": 1, "size": { "width": 64, "height": 64 },
       "root": { "kind": "text", "key": "t", "content": "X",
@@ -745,6 +748,49 @@ fn unregistered_font_family_is_a_render_error() {
         "got: {:?}",
         last_error()
     );
+}
+
+/// The host-declared escalation: with a fallback family set, a document
+/// naming an unregistered family still RENDERS — its text shaped by the
+/// fallback — and the sink hears one WARN naming both families. Clearing
+/// the fallback restores the strict error. The write seam stays strict
+/// throughout: probe still reports the family missing.
+#[test]
+fn a_declared_fallback_renders_the_missing_family_and_warns_once() {
+    let _sink = lock_log_sink();
+    kine_set_log_callback(Some(capture_log));
+    register_font();
+    let doc = r##"{ "version": 1, "size": { "width": 64, "height": 64 },
+      "root": { "kind": "text", "key": "t", "content": "X",
+        "frame": { "x": 0, "y": 0, "width": 64, "height": 64 },
+        "style": { "fontFamily": "Fallback Probe Grotesk", "size": 20, "fill": "#FFFFFF" } } }"##;
+
+    crate::fonts::set_fallback("Inter").expect("embedded Inter must resolve");
+    let rendered = take(render(doc, 0.0, "{}", 64, 64));
+    crate::fonts::set_fallback("").expect("clearing is infallible");
+    kine_set_log_callback(None);
+
+    let png = rendered.unwrap_or_else(|| panic!("fallback render failed: {}", last_error()));
+    assert!(png.starts_with(PNG_SIGNATURE));
+
+    let logs = CAPTURED_LOGS.lock().unwrap();
+    assert!(
+        logs.iter().any(|(level, text)| {
+            *level == 1
+                && text.contains("Fallback Probe Grotesk")
+                && text.contains("falling back to \"Inter\"")
+        }),
+        "the degrade must be loud: {logs:?}"
+    );
+
+    // The door stays strict: probe still names the family missing.
+    let interface = probe(doc).unwrap();
+    assert_eq!(interface["missingFonts"], serde_json::json!(["Fallback Probe Grotesk"]));
+
+    // And with the fallback cleared, the strict error is back.
+    let strict = take(render(doc, 0.0, "{}", 64, 64));
+    assert!(strict.is_none(), "strict mode must refuse again");
+    assert!(last_error().contains("not registered"));
 }
 
 #[test]
