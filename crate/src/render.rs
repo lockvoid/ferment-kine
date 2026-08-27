@@ -528,7 +528,16 @@ fn build_layout(
             Align::Center => Alignment::Center,
             Align::Right => Alignment::Right,
         },
-        AlignmentOptions::default(),
+        // A single word wider than the frame cannot break; parley's default
+        // refuses to align overflowing lines (they fall back to LEFT), which
+        // spills the overflow entirely to the RIGHT of a centered frame —
+        // live 2026-08-26: «MOUNTAINS» at 160px in a 920px frame read as
+        // off-center and clipped one-sided. Center means center: overflow
+        // spills symmetrically.
+        AlignmentOptions {
+            align_when_overflowing: true,
+            ..AlignmentOptions::default()
+        },
     );
     Ok(layout)
 }

@@ -2991,3 +2991,43 @@ mod gpu_parity {
         assert!(engine.render_rgba(&scene, 64, 64, (0.0, 0.0)).is_err());
     }
 }
+
+/// A single word wider than its frame cannot break; center alignment must
+/// spill the overflow SYMMETRICALLY (live 2026-08-26: «MOUNTAINS» in a
+/// title card rendered off-center, clipped right — parley's default
+/// refuses to align overflowing lines).
+#[test]
+fn center_alignment_centers_an_overflowing_line() {
+    let _guard = lock_log_sink();
+    let doc = r##"{
+      "version": 1,
+      "size": {"width": 400, "height": 200},
+      "inputs": [], "colors": [], "assets": [],
+      "root": {"kind": "group", "key": "root", "children": [
+        {"kind": "text", "key": "title", "content": "MOUNTAINS",
+         "frame": {"x": 100, "y": 40, "width": 200, "height": 120},
+         "style": {"fontFamily": "Inter", "weight": 700, "size": 60,
+                    "align": "center", "valign": "center",
+                    "fill": "#ffffffff"}}
+      ]},
+      "animators": []
+    }"##;
+    let px = render_rgba(doc, 400, 200);
+    let mut min_x = None;
+    let mut max_x = None;
+    for y in 0..200usize {
+        for x in 0..400usize {
+            let i = (y * 400 + x) * 4;
+            if px[i] > 0x80 && px[i + 3] > 0x80 {
+                if min_x.is_none_or(|m| x < m) { min_x = Some(x); }
+                if max_x.is_none_or(|m| x > m) { max_x = Some(x); }
+            }
+        }
+    }
+    let (min_x, max_x) = (min_x.expect("ink"), max_x.expect("ink"));
+    assert!(max_x - min_x > 200, "the word must overflow the 200px frame, got {}..{}", min_x, max_x);
+    let left = min_x as i64;
+    let right = 399 - max_x as i64;
+    assert!((left - right).abs() <= 8,
+        "overflow must spill symmetrically around the frame center: left {} vs right {}", left, right);
+}
