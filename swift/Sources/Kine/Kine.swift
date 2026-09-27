@@ -18,12 +18,23 @@ private func kineLogTrampoline(level: Int32, message: UnsafePointer<CChar>?) {
 /// schema modeling in Swift — documents are authored as JSON and validated by
 /// the core.
 public enum Kine {
-    public enum KineError: Error, CustomStringConvertible {
+    /// A failure from the core, carrying the core's own words: which node,
+    /// which key, what was expected.
+    ///
+    /// `LocalizedError` as well as `CustomStringConvertible`, because
+    /// `Error.localizedDescription` — what almost every caller reaches for,
+    /// and what an agent hands back to the model that wrote the document —
+    /// ignores `description` and answers a bare "The operation couldn't be
+    /// completed. (KineError error 0.)". The diagnosis this type exists to
+    /// deliver was reaching the log sink and nothing else.
+    public enum KineError: Error, CustomStringConvertible, LocalizedError {
         case failed(String)
 
         public var description: String {
             switch self { case .failed(let message): return message }
         }
+
+        public var errorDescription: String? { description }
 
         /// The core's thread-local last error, or `fallback` if none is set.
         static func current(_ fallback: String) -> KineError {
