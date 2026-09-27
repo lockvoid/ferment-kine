@@ -60,7 +60,8 @@ color = "=0.3.3"
 image = { version = "=0.25.10", default-features = false, features = ["gif", "webp", "png", "jpeg"] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: an admitted document keeps the author's key order (SCHEMA §10).
+serde_json = { version = "1", features = ["preserve_order"] }
 # Wraps parse errors with the failing JSON path ("animators[2].keyframes[0].ease")
 # — the schema contract promises path-carrying errors.
 serde_path_to_error = "0.1"

@@ -70,6 +70,14 @@ module Kine
     JSON.parse(json)
   end
 
+  # Admit an author's document (SCHEMA §10) → { "document" => String,
+  # "repairs" => [{ "path", "rule", "message" }], "interface" => probe Hash }.
+  def admit(doc)
+    result = FFI.kine_admit(cstring(encode_json(doc)))
+    json = read_buffer(result) || raise(Error, last_error || "admission failed")
+    JSON.parse(json)
+  end
+
   def encode_json(value)
     value.is_a?(String) ? value : JSON.generate(value)
   end

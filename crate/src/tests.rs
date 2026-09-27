@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use crate::eval::{self, Curve, InterpSpace, MapKey, MapValue, RStagger, ValueMap};
 use crate::schema::{Composite, StaggerFrom};
 use crate::{
-    kine_buf, kine_buf_free, kine_document_create, kine_document_free, kine_document_probe,
-    kine_document_render_rgba, kine_last_error, kine_probe, kine_register_font,
-    kine_render_document, kine_render_document_rgba, kine_set_log_callback, kine_version,
+    kine_admit, kine_buf, kine_buf_free, kine_document_create, kine_document_free,
+    kine_document_probe, kine_document_render_rgba, kine_last_error, kine_probe,
+    kine_register_font, kine_render_document, kine_render_document_rgba, kine_set_log_callback,
+    kine_version,
 };
 
 const FONT: &[u8] = include_bytes!("../testdata/font.ttf");
@@ -247,6 +248,26 @@ fn invalid_fixtures_report_pathed_errors() {
             "color_value_unknown_ref",
             include_str!("../tests/fixtures/invalid/color_value_unknown_ref.json"),
             "unknown color entry \"nope\"",
+        ),
+        (
+            "anchor_in_pixels",
+            include_str!("../tests/fixtures/invalid/anchor_in_pixels.json"),
+            "root.transform.anchorX: 540 is outside 0..1 — an anchor is a FRACTION of the group's bounds",
+        ),
+        (
+            "anchor_bound_to_number",
+            include_str!("../tests/fixtures/invalid/anchor_bound_to_number.json"),
+            "root.transform.anchorX: binding type mismatch: input \"pivot\" is number, expected unit",
+        ),
+        (
+            "envelope_unsettled",
+            include_str!("../tests/fixtures/invalid/envelope_unsettled.json"),
+            "inputs[0].default: inProgress defaults to 1",
+        ),
+        (
+            "envelope_not_unit",
+            include_str!("../tests/fixtures/invalid/envelope_not_unit.json"),
+            "inputs[0].type: outProgress is a host envelope — declare it as unit",
         ),
     ];
     for (name, fixture, expected) in table {
@@ -3030,4 +3051,262 @@ fn center_alignment_centers_an_overflowing_line() {
     let right = 399 - max_x as i64;
     assert!((left - right).abs() <= 8,
         "overflow must spill symmetrically around the frame center: left {} vs right {}", left, right);
+}
+
+// --- admit: the author's door (SCHEMA §10) ------------------------------------------
+
+fn admit(doc: &str) -> Option<serde_json::Value> {
+    let doc = CString::new(doc).unwrap();
+    take(kine_admit(doc.as_ptr())).map(|bytes| serde_json::from_slice(&bytes).unwrap())
+}
+
+fn admitted_document(admission: &serde_json::Value) -> String {
+    admission["document"].as_str().expect("the admission carries the document text").to_owned()
+}
+
+fn repair_rules(admission: &serde_json::Value) -> Vec<(String, String)> {
+    admission["repairs"]
+        .as_array()
+        .expect("the admission lists its repairs")
+        .iter()
+        .map(|repair| {
+            (
+                repair["path"].as_str().unwrap().to_owned(),
+                repair["rule"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn corpus(dir: &str) -> Vec<(String, String)> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let mut documents: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, std::fs::read_to_string(&path).unwrap())
+        })
+        .collect();
+    documents.sort();
+    documents
+}
+
+const WINDOWED_TRACKS: &str = include_str!("../tests/fixtures/admit/windowed_tracks.json");
+const WINDOWED_TRACKS_ADMITTED: &str =
+    include_str!("../tests/fixtures/admit/windowed_tracks.admitted.json");
+
+#[test]
+fn admit_leaves_every_valid_document_byte_for_byte() {
+    let mut seen = 0;
+    for dir in ["tests/fixtures", "tests/fixtures/features", "../docs"] {
+        for (name, doc) in corpus(dir) {
+            let admission = admit(&doc).unwrap_or_else(|| panic!("{dir}/{name}: {}", last_error()));
+            assert_eq!(repair_rules(&admission), vec![], "{dir}/{name} needed no repair");
+            assert_eq!(admitted_document(&admission), doc, "{dir}/{name} came back as written");
+            // `missingFonts` is registry state, and other tests register fonts concurrently.
+            let without_registry = |mut interface: serde_json::Value| {
+                interface.as_object_mut().unwrap().remove("missingFonts");
+                interface
+            };
+            assert_eq!(
+                without_registry(admission["interface"].clone()),
+                without_registry(probe(&doc).unwrap()),
+                "{dir}/{name}: the admission describes the same interface as the probe"
+            );
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 17, "the valid corpus");
+}
+
+#[test]
+fn admit_over_the_invalid_corpus_repairs_only_what_has_one_reading() {
+    let repairable = ["envelope_unsettled.json", "kf_missing_endpoints.json"];
+    for (name, doc) in corpus("tests/fixtures/invalid") {
+        let admission = admit(&doc);
+        let admit_error = last_error();
+        if repairable.contains(&name.as_str()) {
+            let admission = admission.unwrap_or_else(|| panic!("{name}: {admit_error}"));
+            assert_eq!(repair_rules(&admission).len(), 1, "{name}: one repair");
+            assert!(probe(&admitted_document(&admission)).is_some(), "{name}: the repaired document probes green");
+        } else {
+            assert!(admission.is_none(), "{name}: refused");
+            assert!(probe(&doc).is_none(), "{name}: the probe refuses it too");
+            assert_eq!(admit_error, last_error(), "{name}: in the probe's own words");
+        }
+    }
+}
+
+#[test]
+fn admit_holds_a_track_that_starts_late_and_ends_early() {
+    let admission = admit(WINDOWED_TRACKS).unwrap_or_else(|| panic!("{}", last_error()));
+    let document: serde_json::Value = serde_json::from_str(&admitted_document(&admission)).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(WINDOWED_TRACKS_ADMITTED).unwrap();
+    assert_eq!(document, expected);
+    assert_eq!(
+        repair_rules(&admission),
+        vec![
+            ("animators[0].keyframes".to_owned(), "keyframes-span".to_owned()),
+            ("animators[1].keyframes".to_owned(), "keyframes-span".to_owned()),
+        ]
+    );
+    assert_eq!(
+        admission["repairs"][1]["message"],
+        "animators[1].keyframes: the track ran 0.15–0.5; added {\"at\":0} holding its first value \
+         and {\"at\":1} holding its last"
+    );
+    assert_eq!(
+        admission["repairs"][0]["message"],
+        "animators[0].keyframes: the track ran 0–0.3; added {\"at\":1} holding its last value"
+    );
+}
+
+#[test]
+fn a_held_track_renders_what_the_evaluator_already_drew() {
+    let key = |at: f64, value: f64, ease: Option<Curve>| MapKey { at, value: MapValue::Num(value), ease };
+    let windowed = ValueMap {
+        keys: vec![key(0.15, 0.0, None), key(0.5, 1.0, Some(Curve::Bezier { x1: 0.0, y1: 0.0, x2: 0.58, y2: 1.0 }))],
+    };
+    let held = ValueMap {
+        keys: vec![
+            key(0.0, 0.0, None),
+            key(0.15, 0.0, None),
+            key(0.5, 1.0, Some(Curve::Bezier { x1: 0.0, y1: 0.0, x2: 0.58, y2: 1.0 })),
+            key(1.0, 1.0, None),
+        ],
+    };
+    let space = InterpSpace::default();
+    for step in 0..=100 {
+        let u = step as f64 / 100.0;
+        let (MapValue::Num(a), MapValue::Num(b)) = (windowed.eval(u, space), held.eval(u, space)) else {
+            panic!()
+        };
+        assert_eq!(a, b, "u = {u}");
+    }
+}
+
+#[test]
+fn admit_settles_an_unsettled_envelope() {
+    let doc = include_str!("../tests/fixtures/invalid/envelope_unsettled.json");
+    let admission = admit(doc).unwrap_or_else(|| panic!("{}", last_error()));
+    let document: serde_json::Value = serde_json::from_str(&admitted_document(&admission)).unwrap();
+    assert_eq!(document["inputs"][0]["default"], 1);
+    assert_eq!(
+        repair_rules(&admission),
+        vec![("inputs[0].default".to_owned(), "settled-envelope".to_owned())]
+    );
+    assert_eq!(
+        admission["repairs"][0]["message"],
+        "inputs[0].default: inProgress rests settled at 1 (was 0) — the host drives it only while an entrance plays"
+    );
+}
+
+#[test]
+fn admit_declares_the_host_signals_the_document_reads() {
+    let doc = r##"{ "version": 1, "size": { "width": 400, "height": 200 },
+      "root": { "kind": "group", "key": "root", "opacity": { "input": "inProgress" }, "children": [
+        { "kind": "text", "key": "line", "content": "one two",
+          "frame": { "x": 0, "y": 0, "width": 400, "height": 200 },
+          "style": { "fontFamily": "Inter", "size": 40, "fill": "#ffffff", "activeFill": "#ffd400" } } ] },
+      "animators": [
+        { "target": "line.words", "property": "color", "weight": { "input": "activations" } },
+        { "target": "root", "property": "rotate", "driver": "time", "period": 2, "from": 0, "to": 360 } ] }"##;
+    let admission = admit(doc).unwrap_or_else(|| panic!("{}", last_error()));
+    let document: serde_json::Value = serde_json::from_str(&admitted_document(&admission)).unwrap();
+    assert_eq!(
+        document["inputs"],
+        serde_json::json!([
+            { "key": "inProgress", "type": "unit", "default": 1 },
+            { "key": "activations", "type": "unitArray", "default": [] },
+            { "key": "time", "type": "time", "default": 0 }
+        ])
+    );
+    assert_eq!(
+        repair_rules(&admission),
+        vec![
+            ("inputs".to_owned(), "host-signal".to_owned()),
+            ("inputs".to_owned(), "host-signal".to_owned()),
+            ("inputs".to_owned(), "host-signal".to_owned()),
+        ]
+    );
+    assert_eq!(
+        admission["repairs"][2]["message"],
+        "inputs: declared \"time\" (time, default 0) — animators[1].driver reads it"
+    );
+}
+
+#[test]
+fn admit_is_idempotent_and_keeps_the_authors_key_order() {
+    let first = admit(WINDOWED_TRACKS).unwrap_or_else(|| panic!("{}", last_error()));
+    let document = admitted_document(&first);
+    assert!(
+        document.starts_with(r#"{"version":1,"size":{"width":1080,"height":1920},"inputs":"#),
+        "the author's keys keep their order: {}",
+        &document[..80]
+    );
+    let second = admit(&document).unwrap_or_else(|| panic!("{}", last_error()));
+    assert_eq!(repair_rules(&second), vec![]);
+    assert_eq!(admitted_document(&second), document);
+}
+
+#[test]
+fn admit_refuses_what_has_two_readings() {
+    let with_animator = |animator: &str| {
+        format!(
+            r##"{{ "version": 1, "size": {{ "width": 64, "height": 64 }},
+              "inputs": [ {{ "key": "progress", "type": "unit", "default": 0 }} ],
+              "root": {{ "kind": "shape", "key": "dot",
+                "geometry": {{ "kind": "ellipse", "cx": 32, "cy": 32, "rx": 20, "ry": 20 }},
+                "fill": {{ "kind": "solid", "color": "#FF0000" }} }},
+              "animators": [ {animator} ] }}"##
+        )
+    };
+    let cases = [
+        (
+            "an ease on the first key: arriving or leaving?",
+            with_animator(
+                r#"{ "target": "dot", "property": "opacity", "driver": "progress",
+                     "keyframes": [ { "at": 0.2, "value": 0, "ease": "easeOut" }, { "at": 0.8, "value": 1 } ] }"#,
+            ),
+            "animators[0].keyframes[0].ease",
+        ),
+        (
+            "a key outside the driver's span",
+            with_animator(
+                r#"{ "target": "dot", "property": "opacity", "driver": "progress",
+                     "keyframes": [ { "at": 0.2, "value": 0 }, { "at": 1.2, "value": 1 } ] }"#,
+            ),
+            "animators[0].keyframes",
+        ),
+        (
+            "a single key",
+            with_animator(
+                r#"{ "target": "dot", "property": "opacity", "driver": "progress",
+                     "keyframes": [ { "at": 0.5, "value": 1 } ] }"#,
+            ),
+            "needs at least 2 keyframes",
+        ),
+        (
+            "an input no host drives",
+            with_animator(r#"{ "target": "dot", "property": "opacity", "driver": "reveal", "from": 0, "to": 1 }"#),
+            "undeclared input \"reveal\"",
+        ),
+        (
+            "an anchor in pixels",
+            include_str!("../tests/fixtures/invalid/anchor_in_pixels.json").to_owned(),
+            "root.transform.anchorX: 540 is outside 0..1",
+        ),
+        (
+            "an envelope declared as a number",
+            include_str!("../tests/fixtures/invalid/envelope_not_unit.json").to_owned(),
+            "outProgress is a host envelope — declare it as unit",
+        ),
+    ];
+    for (case, doc, expected) in cases {
+        assert!(admit(&doc).is_none(), "{case}: refused");
+        let error = last_error();
+        assert!(error.contains(expected), "{case}: {error:?} does not contain {expected:?}");
+    }
 }

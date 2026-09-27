@@ -79,6 +79,12 @@ kine_buf kine_render_document_rgba(const char *doc_json, double t,
  *   "fonts": [...], "missingFonts": [...] }. */
 kine_buf kine_probe(const char *doc_json);
 
+/* Admit an AUTHOR's document (SCHEMA §10): repair what has one reading, then
+ * validate. Returns JSON { "document": "<json>", "repairs": [{ "path", "rule",
+ * "message" }], "interface": { ...as kine_probe... } }; the document text is
+ * the author's own bytes when nothing was repaired. */
+kine_buf kine_admit(const char *doc_json);
+
 /* ---- handles (parse once; render every frame) ---------------------------- */
 
 /* Parse + validate a document and keep it as a reusable handle. Returns the

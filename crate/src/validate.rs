@@ -99,6 +99,18 @@ struct NodeInfo {
 
 // --- inputs -------------------------------------------------------------------
 
+/// The host's envelopes (§2) and the value each rests at: the host drives them
+/// only while an entrance or an exit plays.
+pub const HOST_ENVELOPES: [(&str, f64); 2] = [("inProgress", 1.0), ("outProgress", 0.0)];
+
+fn envelope_rule(key: &str, settled: f64) -> String {
+    let plays = if key == "inProgress" { "an entrance" } else { "an exit" };
+    format!(
+        "{key} defaults to {settled} — a host envelope rests settled: the host drives it only while \
+         {plays} plays, and motion the document drives itself rides \"time\""
+    )
+}
+
 fn check_inputs(inputs: &[Input]) -> Result<HashMap<String, &'static str>, SchemaError> {
     let mut map = HashMap::new();
     for (index, input) in inputs.iter().enumerate() {
@@ -173,6 +185,23 @@ fn check_inputs(inputs: &[Input]) -> Result<HashMap<String, &'static str>, Schem
                 }
             }
             Input::String(_) | Input::FontFamily(_) => {}
+        }
+        if let Some(&(_, settled)) = HOST_ENVELOPES.iter().find(|(envelope, _)| *envelope == key) {
+            match input {
+                Input::Unit(i) if i.default == settled => {}
+                Input::Unit(_) => {
+                    return Err(SchemaError::new(
+                        format!("{path}.default"),
+                        envelope_rule(key, settled),
+                    ));
+                }
+                _ => {
+                    return Err(SchemaError::new(
+                        format!("{path}.type"),
+                        format!("{key} is a host envelope — declare it as unit"),
+                    ));
+                }
+            }
         }
     }
     Ok(map)
@@ -433,9 +462,29 @@ fn check_transform(
     )?;
     check_opt_binding_number(&transform.scale, &format!("{path}.scale"), inputs)?;
     check_opt_binding_number(&transform.rotate, &format!("{path}.rotate"), inputs)?;
-    check_opt_binding_number(&transform.anchor_x, &format!("{path}.anchorX"), inputs)?;
-    check_opt_binding_number(&transform.anchor_y, &format!("{path}.anchorY"), inputs)?;
+    check_anchor(&transform.anchor_x, &format!("{path}.anchorX"), inputs)?;
+    check_anchor(&transform.anchor_y, &format!("{path}.anchorY"), inputs)?;
     Ok(())
+}
+
+/// An anchor is a FRACTION of the group's bounds (§5): a literal inside
+/// [0, 1] or a unit input.
+fn check_anchor(
+    anchor: &Option<Bindable<f64>>,
+    path: &str,
+    inputs: &HashMap<String, &'static str>,
+) -> Result<(), SchemaError> {
+    match anchor {
+        Some(Bindable::Literal(value)) if !(0.0..=1.0).contains(value) => Err(SchemaError::new(
+            path,
+            format!(
+                "{value} is outside 0..1 — an anchor is a FRACTION of the group's bounds \
+                 (0.5 = center, the default), never pixels"
+            ),
+        )),
+        Some(binding) => binding_check(binding, path, inputs, &["unit"], || Ok(())),
+        None => Ok(()),
+    }
 }
 
 fn check_frame(
@@ -1152,16 +1201,16 @@ fn check_value_mapping(
             }
             let first = &keyframes[0];
             let last = &keyframes[keyframes.len() - 1];
-            if first.at != 0.0 || last.at != 1.0 {
-                return Err(SchemaError::new(
-                    format!("{path}.keyframes"),
-                    "explicit at: 0 first and at: 1 last keyframes are required",
-                ));
-            }
             if first.ease.is_some() {
                 return Err(SchemaError::new(
                     format!("{path}.keyframes[0].ease"),
                     "ease describes the arriving segment; the first keyframe has none",
+                ));
+            }
+            if first.at != 0.0 || last.at != 1.0 {
+                return Err(SchemaError::new(
+                    format!("{path}.keyframes"),
+                    "explicit at: 0 first and at: 1 last keyframes are required",
                 ));
             }
             let mut previous = -1.0f64;

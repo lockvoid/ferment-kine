@@ -155,6 +155,37 @@ pub extern "C" fn kine_probe(doc_json: *const c_char) -> kine_buf {
     })
 }
 
+/// Admit an AUTHOR's document (SCHEMA §10): repair what has one reading, then
+/// validate. `{ "document": "<json>", "repairs": [{ "path", "rule", "message" }],
+/// "interface": { …as kine_probe… } }`; a refusal goes through the error
+/// channel. The document text is the author's own bytes when nothing was
+/// repaired.
+#[no_mangle]
+pub extern "C" fn kine_admit(doc_json: *const c_char) -> kine_buf {
+    guard(move || {
+        let admission =
+            crate::admit::admit(cstr(doc_json, "document")?).map_err(|e| e.to_string())?;
+        let repairs: Vec<serde_json::Value> = admission
+            .repairs
+            .iter()
+            .map(|repair| {
+                serde_json::json!({
+                    "path": repair.path,
+                    "rule": repair.rule,
+                    "message": repair.message,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "document": admission.document,
+            "repairs": repairs,
+            "interface": interface_json(&admission.compiled),
+        })
+        .to_string()
+        .into_bytes())
+    })
+}
+
 // --- handles ----------------------------------------------------------------
 
 /// Parse + validate a document and keep it as a reusable handle (parsing the

@@ -1,0 +1,16 @@
+{ "version": 1, "size": { "width": 1080, "height": 1920 },
+  "inputs": [ { "key": "inProgress", "type": "unit", "default": 1 } ],
+  "root": { "kind": "group", "key": "root", "children": [
+    { "kind": "shape", "key": "rule",
+      "geometry": { "kind": "rect", "x": 470, "y": 846, "width": 140, "height": 2 },
+      "fill": { "kind": "solid", "color": "#8fa8b8" } },
+    { "kind": "text", "key": "title", "content": "MOUNTAINS",
+      "frame": { "x": 80, "y": 890, "width": 920, "height": 220 },
+      "style": { "fontFamily": "Inter", "size": 120, "align": "center", "valign": "center", "fill": "#f2efe6" } } ] },
+  "animators": [
+    { "target": "title", "property": "opacity", "driver": "inProgress",
+      "keyframes": [ { "at": 0, "value": 0 }, { "at": 0.3, "value": 1, "ease": "easeOut" }, { "at": 1, "value": 1 } ] },
+    { "target": "rule", "property": "opacity", "driver": "inProgress",
+      "keyframes": [ { "at": 0, "value": 0 }, { "at": 0.15, "value": 0 }, { "at": 0.5, "value": 1, "ease": "easeOut" }, { "at": 1, "value": 1 } ] },
+    { "target": "title", "property": "translateY", "driver": "inProgress",
+      "keyframes": [ { "at": 0, "value": 24 }, { "at": 1, "value": 0, "ease": "easeOut" } ] } ] }

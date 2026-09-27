@@ -58,9 +58,13 @@ a document with no supplied signals renders its designed look.
 | `enum`       | one of declared `values`           |                                  |
 | `fontFamily` | string                             | resolved against registered fonts|
 
-Input keys: `[a-z][a-zA-Z0-9]*`, unique. Standard keys by convention (not
-schema-special): `time`, `inProgress`, `outProgress`, `focus`, `text`,
-`activations`, `emphasis` — the engine and compiler wire these uniformly.
+Input keys: `[a-z][a-zA-Z0-9]*`, unique. Standard keys: `time`,
+`inProgress`, `outProgress`, `focus`, `text`, `activations`, `emphasis` —
+the engine and compiler wire these uniformly. `inProgress` and `outProgress`
+are the host's ENVELOPES: the host drives them only while an entrance or an
+exit plays, and a document at rest shows its settled state — so, declared,
+they are `unit` and default to their settled value (`inProgress` 1,
+`outProgress` 0). Motion the document drives itself rides `time`.
 Standard SEED inputs (color-typed): `foreground`, `background`, `accent` —
 the published color interface. Hosts map them from user pickers and brand
 roles (`foreground ← brand.text`, `background ← brand.background`,
@@ -211,7 +215,9 @@ declarable but not bindable in v1.
   "children": [] }
 ```
 
-`rotate` in degrees. `anchorX/Y` are fractions of the group's bounds.
+`rotate` in degrees. `anchorX/Y` are FRACTIONS of the group's bounds (0.5 =
+center, the default): a literal inside [0,1] or a `unit` input — never
+pixels.
 `transform` and `opacity` are optional (identity / 1).
 
 ### shape
@@ -228,8 +234,9 @@ Geometries: `rect` (x, y, width, height) · `roundedRect` (+ radius) ·
 `ellipse` (cx, cy, rx, ry) · `path` (`d`: SVG path data string).
 
 Paints: `solid` (color) · `linearGradient` (x1, y1, x2, y2, `stops:
-[{at, color}]`) · `radialGradient` (cx, cy, r, stops). Gradient stops: `at`
-∈ [0,1] monotone.
+[{at, color}]`) · `radialGradient` (cx, cy, r, stops). Gradient points are in
+the same canvas pixels as the geometry. Gradient stops: at least 2, `at` ∈
+[0,1] strictly increasing.
 
 `fill` and `stroke` are each optional; at least one required.
 
@@ -430,10 +437,13 @@ seeded and baked at load), no clocks, no environment reads.
   non-text node; `property` not in the vocabulary for the target
 - `driver`/`weight`/binding referencing an undeclared input or one of the
   wrong type; `time` driver without `period`
-- keyframes: `at` not strictly increasing, missing 0/1 endpoints, `ease`
-  on the first keyframe
+- keyframes: `ease` on the first keyframe, missing 0/1 endpoints, `at` not
+  strictly increasing
 - value out of domain: unit outside [0,1] (defaults), malformed color,
-  gradient stops non-monotone, enum default not in `values`
+  gradient stops not strictly increasing, enum default not in `values`
+- an anchor outside [0,1], or bound to an input that is not `unit`
+- `inProgress`/`outProgress` declared other than `unit`, or defaulting away
+  from their settled value (§2)
 - text node without `content`; shape without fill and stroke
 - binding type mismatch (e.g. `string` input bound to a color property)
 - colors table: duplicate entry key; reference to an unknown or LATER
@@ -457,3 +467,34 @@ Also reserved: group `clip` shapes, filter/effect nodes
 typographic-space per-unit `size`/`weight` animation, nested/component
 documents, path morphing, dash patterns, additional color functions
 (lighten/darken sugar, hue rotation).
+
+## 10. Admission — the author's door
+
+`kine_admit` takes a document from an AUTHOR whose output the host cannot fix
+at its source (an agent) and returns the document the host stores —
+`{ "document": "<json>", "repairs": [{ "path", "rule", "message" }],
+"interface": { …as probe… } }` — or a refusal through the error channel.
+
+1. Parse strictly (§1). A malformed document is refused as written.
+2. Repair what has exactly ONE reading. Each repair rewrites the author's
+   JSON at its own path; nothing else moves, and a document that needed no
+   repair comes back as the author's own text.
+   - `keyframes-span` — a track whose first `at` is above 0 gains
+     `{ "at": 0 }` repeating its first value; one whose last `at` is below 1
+     gains `{ "at": 1 }` repeating its last. The track holds its ends, as a
+     clamped driver does. Only a track of two or more keys, all inside
+     [0,1], strictly increasing, with no `ease` on its first key.
+   - `settled-envelope` — `inProgress`/`outProgress` declared `unit` with
+     another default rest at their settled value (§2).
+   - `host-signal` — a document that reads a standard signal it never
+     declared (a driver, a stagger driver, a weight input, an
+     `{ "input" }` binding) is given the declaration the host drives:
+     `time` (time, 0), `inProgress` (unit, 1), `outProgress` (unit, 0),
+     `activations`/`emphasis`/`focus` (unitArray, []).
+3. Validate (§8). The first error refuses, in the probe's words.
+
+What has two readings is never guessed and stays a refusal: an `ease` on a
+track's first key (arriving or leaving?), a key outside [0,1], a single key,
+an input no host drives, an anchor in pixels. `probe` never repairs — a host
+that owns the source of its documents (catalogs, seeds) probes them, and
+whatever would need a repair is invalid there.

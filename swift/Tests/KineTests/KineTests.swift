@@ -45,6 +45,40 @@ final class KineTests: XCTestCase {
             ["time", "progress", "activations", "font", "foreground", "background", "accent", "borderColor"])
     }
 
+    func testAdmitRepairsWhatHasOneReadingAndSaysSo() throws {
+        let windowed = """
+            { "version": 1, "size": { "width": 64, "height": 64 },
+              "inputs": [ { "key": "inProgress", "type": "unit", "default": 0 } ],
+              "root": { "kind": "shape", "key": "dot",
+                "geometry": { "kind": "ellipse", "cx": 32, "cy": 32, "rx": 20, "ry": 20 },
+                "fill": { "kind": "solid", "color": "#FF0000" } },
+              "animators": [ { "target": "dot", "property": "opacity", "driver": "inProgress",
+                "keyframes": [ { "at": 0.2, "value": 0 }, { "at": 0.6, "value": 1 } ] } ] }
+            """
+        let admission = try Kine.admit(windowed)
+        XCTAssertEqual(admission.repairs.map(\.rule), ["keyframes-span", "settled-envelope"])
+        XCTAssertEqual(admission.interface.size.width, 64)
+        XCTAssertEqual(try Kine.Document(json: admission.document).probe().inputs.map(\.key), ["inProgress"])
+    }
+
+    func testAdmitHandsAValidDocumentBackAsWritten() throws {
+        let admission = try Kine.admit(Self.cardJSON)
+        XCTAssertEqual(admission.document, Self.cardJSON)
+        XCTAssertEqual(admission.repairs, [])
+    }
+
+    func testAdmitRefusesInTheCoresWords() {
+        let pixels = """
+            { "version": 1, "size": { "width": 1080, "height": 1920 },
+              "root": { "kind": "group", "key": "root", "transform": { "anchorX": 540 }, "children": [] } }
+            """
+        XCTAssertThrowsError(try Kine.admit(pixels)) { error in
+            XCTAssertTrue(
+                error.localizedDescription.contains("root.transform.anchorX: 540 is outside 0..1"),
+                error.localizedDescription)
+        }
+    }
+
     func testProbeManifestsReferencedAndMissingFonts() throws {
         // The card's text binds `fontFamily` to the "font" input, whose default
         // is the registered test face — referenced, nothing missing.

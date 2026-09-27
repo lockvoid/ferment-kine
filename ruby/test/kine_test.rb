@@ -78,6 +78,38 @@ class KineTest < Minitest::Test
     assert_match(/nope/, error.message)
   end
 
+  WINDOWED = {
+    "version" => 1, "size" => { "width" => 64, "height" => 64 },
+    "inputs" => [{ "key" => "inProgress", "type" => "unit", "default" => 0 }],
+    "root" => { "kind" => "shape", "key" => "dot",
+                "geometry" => { "kind" => "ellipse", "cx" => 32, "cy" => 32, "rx" => 20, "ry" => 20 },
+                "fill" => { "kind" => "solid", "color" => "#FF0000" } },
+    "animators" => [{ "target" => "dot", "property" => "opacity", "driver" => "inProgress",
+                      "keyframes" => [{ "at" => 0.2, "value" => 0 }, { "at" => 0.6, "value" => 1 }] }]
+  }.freeze
+
+  def test_admit_repairs_what_has_one_reading_and_says_so
+    admission = Kine.admit(WINDOWED)
+    document = JSON.parse(admission.fetch("document"))
+    assert_equal [0, 0.2, 0.6, 1], document["animators"][0]["keyframes"].map { |key| key["at"] }
+    assert_equal 1, document["inputs"][0]["default"]
+    assert_equal %w[keyframes-span settled-envelope], admission.fetch("repairs").map { |repair| repair["rule"] }
+    assert_equal 64.0, admission.dig("interface", "size", "width")
+  end
+
+  def test_admit_hands_a_valid_document_back_as_written
+    admission = Kine.admit(FIXTURE)
+    assert_equal FIXTURE, admission.fetch("document")
+    assert_empty admission.fetch("repairs")
+  end
+
+  def test_admit_refuses_in_the_crates_words
+    pixels = WINDOWED.merge("root" => { "kind" => "group", "key" => "root",
+                                        "transform" => { "anchorX" => 540 }, "children" => [WINDOWED["root"]] })
+    error = assert_raises(Kine::Error) { Kine.admit(pixels) }
+    assert_includes error.message, "root.transform.anchorX: 540 is outside 0..1"
+  end
+
   def test_empty_document_raises
     error = assert_raises(Kine::Error) do
       Kine.render_document({}, t: 0.0, width: 64, height: 64)

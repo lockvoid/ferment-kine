@@ -136,6 +136,27 @@ public enum Kine {
         }
     }
 
+    /// An author's document admitted (SCHEMA §10): the text the host stores,
+    /// what the door repaired, and the document's interface.
+    public struct Admission: Decodable, Sendable {
+        public struct Repair: Decodable, Sendable, Equatable {
+            public let path: String
+            public let rule: String
+            public let message: String
+        }
+
+        public let document: String
+        public let repairs: [Repair]
+        public let interface: ProbeResult
+    }
+
+    /// Repair what has one reading, then validate (SCHEMA §10). A refusal
+    /// throws the core's own words.
+    public static func admit(_ json: String) throws -> Admission {
+        let data = try json.withCString { try consume(kine_admit($0), "admission") }
+        return try JSONDecoder().decode(Admission.self, from: data)
+    }
+
     /// One rendered frame: RGBA8, premultiplied alpha, sRGB, row-major.
     public struct RenderedFrame: Sendable {
         public let data: Data
