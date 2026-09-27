@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "size": { "width": 512, "height": 512 },
+  "inputs": [
+    { "key": "time", "type": "time", "default": 0 },
+    { "key": "progress", "type": "unit", "default": 0 },
+    { "key": "activations", "type": "unitArray", "default": [] },
+    { "key": "font", "type": "fontFamily", "default": "Bebas Neue" },
+    { "key": "foreground", "type": "color", "default": "#ECECF4" },
+    { "key": "background", "type": "color", "default": "#181A2A" },
+    { "key": "accent", "type": "color", "default": "#FF5C7A" },
+    { "key": "borderColor", "type": "color", "default": "#FFFFFF" }
+  ],
+  "colors": [
+    { "key": "textFill",    "value": { "input": "foreground" } },
+    { "key": "active",      "value": { "input": "accent" } },
+    { "key": "pending",     "value": { "fn": "mix", "a": "textFill", "b": { "input": "background" }, "t": 0.55 } },
+    { "key": "plateTop",    "value": { "input": "background" } },
+    { "key": "plateBottom", "value": { "fn": "mix", "a": "plateTop", "b": "active", "t": 0.28 } },
+    { "key": "border",      "value": { "fn": "contrast", "of": "plateTop" },
+      "override": { "input": "borderColor" } },
+    { "key": "barFill",     "value": { "fn": "alpha", "of": "active", "amount": 0.9 } }
+  ],
+  "root": {
+    "kind": "group",
+    "key": "card",
+    "role": "card",
+    "children": [
+      {
+        "kind": "shape",
+        "key": "plate",
+        "geometry": { "kind": "roundedRect", "x": 16, "y": 16, "width": 480, "height": 480, "radius": 24 },
+        "fill": {
+          "kind": "linearGradient",
+          "x1": 0, "y1": 0, "x2": 0, "y2": 512,
+          "stops": [
+            { "at": 0, "color": { "color": "plateTop" } },
+            { "at": 1, "color": { "color": "plateBottom" } }
+          ]
+        },
+        "stroke": { "color": { "color": "border" }, "width": 3, "cap": "round", "join": "round" }
+      },
+      {
+        "kind": "text",
+        "key": "line",
+        "role": "text",
+        "content": "MOTION CORE",
+        "frame": { "x": 26, "y": 176, "width": 460, "height": 160 },
+        "style": {
+          "fontFamily": { "input": "font" },
+          "size": 82,
+          "lineHeight": 1.1,
+          "align": "center",
+          "valign": "center",
+          "fill": { "color": "pending" },
+          "activeFill": { "color": "active" }
+        }
+      },
+      {
+        "kind": "group",
+        "key": "barLayer",
+        "opacity": 0.35,
+        "children": [
+          {
+            "kind": "shape",
+            "key": "bar",
+            "geometry": { "kind": "rect", "x": 16, "y": 246, "width": 480, "height": 20 },
+            "fill": { "kind": "solid", "color": { "color": "barFill" } }
+          }
+        ]
+      }
+    ]
+  },
+  "animators": [
+    {
+      "target": "line.glyphs",
+      "property": "translateY",
+      "weight": { "stagger": { "driver": "time", "period": 2, "total": 0.6, "from": "start", "ease": "linear" } },
+      "keyframes": [
+        { "at": 0, "value": 0 },
+        { "at": 0.5, "value": -8, "ease": "easeInOut" },
+        { "at": 1, "value": 0, "ease": "easeInOut" }
+      ]
+    },
+    {
+      "target": "line.glyphs",
+      "property": "color",
+      "weight": { "stagger": { "driver": "progress", "total": 0.8, "from": "start" } },
+      "ease": "easeOut"
+    },
+    {
+      "target": "line.words",
+      "property": "scale",
+      "weight": { "input": "activations" },
+      "from": 1.0,
+      "to": 1.12,
+      "ease": { "spring": { "bounce": 0.4, "duration": 0.5 } },
+      "composite": "multiply"
+    },
+    {
+      "target": "bar",
+      "property": "scaleX",
+      "driver": "progress",
+      "from": 0.2,
+      "to": 1,
+      "ease": "easeOut"
+    }
+  ]
+}

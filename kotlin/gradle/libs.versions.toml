@@ -1,0 +1,17 @@
+# The aliases the two modules use, at the Android app's versions: when the app
+# includes them, its own catalog answers the same names.
+[versions]
+agp = "9.4.0"
+kotlin = "2.4.10"
+serialization = "1.11.0"
+jna = "5.19.1"
+
+[libraries]
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

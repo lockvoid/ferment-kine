@@ -14,3 +14,12 @@
 /ruby/tmp/
 
 /tmp
+
+# Kotlin binding build products (kotlin/build.sh and Gradle).
+/kotlin/.gradle/
+/kotlin/.kotlin/
+/kotlin/build/
+/kotlin/kine/build/
+/kotlin/kine-android/build/
+/kotlin/kine-android/src/main/jniLibs/
+/kotlin/local.properties

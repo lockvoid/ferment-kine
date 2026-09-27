@@ -68,6 +68,11 @@ let frame = try Kine.Document(json: doc).renderRGBA(t: 0.5, signals: ["progress"
                                                     width: 800, height: 260)
 ```
 
+```kotlin
+// Kotlin — :kine + :kine-android (kotlin/)
+val frame = Kine.Document(doc).use { it.renderRGBA(t = 0.5, signals = mapOf("progress" to 0.5), width = 800, height = 260) }
+```
+
 ## More, from the same idea
 
 **One accent → a whole palette.** There is no host-side color math — the
@@ -156,8 +161,8 @@ demos are built by [`scripts/render-readme-assets.rb`](scripts/render-readme-ass
   evaluated as a plain `f(progress)`.
 - **Deterministic** — identical inputs, identical pixels, every platform, forever.
   Goldens are the conformance suite.
-- **Panic-proof C ABI** with Ruby and Swift bindings; bad input is an error, never
-  a crash.
+- **Panic-proof C ABI** with Ruby, Swift and Kotlin bindings; bad input is an error,
+  never a crash.
 
 ## Status
 
@@ -174,6 +179,8 @@ through `kine_version()` / `probe`.
   C ABI; `crate/tests/goldens/` is the conformance suite.
 - [`ruby/`](ruby) — the Ruby gem ([README](ruby/README.md)).
 - [`swift/`](swift) — the Swift package.
+- [`kotlin/`](kotlin) — the Kotlin binding: `:kine` (JVM, JNA over the C ABI) and
+  `:kine-android` (the arm64 `.so`); `kotlin/build.sh` builds the core for both.
 
 ---
 

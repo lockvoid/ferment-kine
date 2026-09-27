@@ -5,6 +5,10 @@ release; the schema version (see `kine_version()`) marks wire-format compatibili
 
 ## Unreleased
 
+- Kotlin binding lives here now (`kotlin/`): `:kine` (JVM — the JNA mirror of
+  `kine.h`, with its tests) and `:kine-android` (the arm64 `.so` payload);
+  `kotlin/build.sh` builds the core for both. It lived in the Android app's
+  `native/kine`; the app includes the two modules from `KINE_ROOT`.
 - `kine_admit` — the author's door (SCHEMA §10): repairs what has one reading
   (`keyframes-span`, `settled-envelope`, `host-signal`), then validates; returns
   the stored document, its repairs and the probe interface. Ruby `Kine.admit`,
