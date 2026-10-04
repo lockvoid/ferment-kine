@@ -611,9 +611,39 @@ pub extern "C" fn kine_gpu_engine_create(
     }
 }
 
+/// Create the GPU engine on the GLES context CURRENT on the calling thread — the
+/// Android twin of `kine_gpu_engine_create`. Returns the engine handle (> 0), or
+/// 0 on failure (see `kine_last_error`).
+///
+/// The host's context IS the venue: kine's commands run in it, in issue order
+/// with the host's own, so a render needs no fence and no wait. Every later
+/// call on this engine — renders and the final destroy — must come from a
+/// thread where that same context is current. Creation leaves the context at
+/// GLES defaults for the state it touched, as every render does.
+#[cfg(feature = "gpu-gles")]
+#[no_mangle]
+pub extern "C" fn kine_gpu_gles_engine_create() -> i64 {
+    error::clear();
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<i64, String> {
+        let engine = unsafe { crate::gpu::GpuEngine::from_current_gles() }?;
+        Ok(crate::gpu::insert_engine(engine))
+    }));
+    match result {
+        Ok(Ok(id)) => id,
+        Ok(Err(message)) => {
+            error::set(message);
+            0
+        }
+        Err(_) => {
+            error::set("panic in kine_gpu_gles_engine_create");
+            0
+        }
+    }
+}
+
 /// Destroy a GPU engine. Idempotent; a use-after-free reports an error on the
 /// next call, never a crash.
-#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+#[cfg(any(all(feature = "gpu", target_vendor = "apple"), feature = "gpu-gles"))]
 #[no_mangle]
 pub extern "C" fn kine_gpu_engine_destroy(engine: i64) {
     let _ = catch_unwind(AssertUnwindSafe(|| crate::gpu::remove_engine(engine)));
@@ -652,7 +682,7 @@ pub extern "C" fn kine_gpu_render_document(
         width,
         height,
         None,
-        mtl_texture,
+        GpuTarget::Metal(mtl_texture),
     )
 }
 
@@ -681,11 +711,84 @@ pub extern "C" fn kine_gpu_render_document_viewport(
         width,
         height,
         Some((view_y, view_h)),
-        mtl_texture,
+        GpuTarget::Metal(mtl_texture),
     )
 }
 
-#[cfg(all(feature = "gpu", target_vendor = "apple"))]
+/// Rasterize a document handle at time `t` into a HOST-owned GL texture — the
+/// Android twin of `kine_gpu_render_document`. Returns 0 on success, -1 on
+/// failure (see `kine_last_error`).
+///
+/// `gl_texture` must name a complete `GL_TEXTURE_2D` of `GL_RGBA8`, exactly
+/// `width`x`height`, one level, of the engine's context or its share group —
+/// the caller's contract, since GL cannot check it without a stall. kine writes
+/// premultiplied RGBA8, the bytes `kine_document_render_rgba` produces.
+///
+/// The commands run in the host's context as they are issued, so the host's
+/// next draw in that context samples the finished pixels. On return the
+/// context is at GLES defaults for everything the render bound or enabled
+/// (kine.h lists them). On ANY failure the texture is left untouched and the
+/// host falls back to the CPU flavor for this frame.
+#[cfg(feature = "gpu-gles")]
+#[no_mangle]
+pub extern "C" fn kine_gpu_gles_render_document(
+    engine: i64,
+    document: i64,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+    gl_texture: u32,
+) -> i32 {
+    gpu_render(
+        engine,
+        document,
+        t,
+        signals_json,
+        width,
+        height,
+        None,
+        GpuTarget::Gl(gl_texture),
+    )
+}
+
+/// `kine_gpu_gles_render_document` over a vertical design-space viewport.
+#[cfg(feature = "gpu-gles")]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn kine_gpu_gles_render_document_viewport(
+    engine: i64,
+    document: i64,
+    t: f64,
+    signals_json: *const c_char,
+    width: u32,
+    height: u32,
+    view_y: f64,
+    view_h: f64,
+    gl_texture: u32,
+) -> i32 {
+    gpu_render(
+        engine,
+        document,
+        t,
+        signals_json,
+        width,
+        height,
+        Some((view_y, view_h)),
+        GpuTarget::Gl(gl_texture),
+    )
+}
+
+/// Where a GPU render lands: a host `id<MTLTexture>`, or a host GL texture name.
+#[cfg(any(all(feature = "gpu", target_vendor = "apple"), feature = "gpu-gles"))]
+enum GpuTarget {
+    #[cfg(all(feature = "gpu", target_vendor = "apple"))]
+    Metal(*mut std::ffi::c_void),
+    #[cfg(feature = "gpu-gles")]
+    Gl(u32),
+}
+
+#[cfg(any(all(feature = "gpu", target_vendor = "apple"), feature = "gpu-gles"))]
 #[allow(clippy::too_many_arguments)]
 fn gpu_render(
     engine: i64,
@@ -695,7 +798,7 @@ fn gpu_render(
     width: u32,
     height: u32,
     viewport: Option<(f64, f64)>,
-    mtl_texture: *mut std::ffi::c_void,
+    target: GpuTarget,
 ) -> i32 {
     error::clear();
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
@@ -713,7 +816,16 @@ fn gpu_render(
         let mut engine = engine
             .lock()
             .map_err(|_| "gpu engine mutex poisoned".to_string())?;
-        unsafe { engine.render_to_metal_texture(&scene, width, height, viewport, mtl_texture) }
+        match target {
+            #[cfg(all(feature = "gpu", target_vendor = "apple"))]
+            GpuTarget::Metal(texture) => unsafe {
+                engine.render_to_metal_texture(&scene, width, height, viewport, texture)
+            },
+            #[cfg(feature = "gpu-gles")]
+            GpuTarget::Gl(texture) => unsafe {
+                engine.render_to_gl_texture(&scene, width, height, viewport, texture)
+            },
+        }
     }));
     match result {
         Ok(Ok(())) => 0,
@@ -733,5 +845,5 @@ fn gpu_render(
 /// CPU-only build where every `kine_gpu_*` entry point is absent.
 #[no_mangle]
 pub extern "C" fn kine_gpu_available() -> i32 {
-    i32::from(cfg!(all(feature = "gpu", target_vendor = "apple")))
+    i32::from(cfg!(any(all(feature = "gpu", target_vendor = "apple"), feature = "gpu-gles")))
 }

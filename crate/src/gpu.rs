@@ -1,16 +1,21 @@
-//! The GPU raster flavor: `vello_hybrid` over wgpu/Metal. Behind the `gpu`
+//! The GPU raster flavor: `vello_gpu` over wgpu/Metal. Behind the `gpu`
 //! feature, which the ruby gem and the rails server never enable — they build
 //! the CPU flavor and must not pull the wgpu tree.
 //!
 //! This module owns NO drawing. The scene walk lives once in [`crate::render`]
 //! and is generic over [`Canvas`]; all that is here is the wgpu venue, an image
-//! atlas, and the [`Canvas`] impl that routes `vello_hybrid`.
+//! atlas, and the [`Canvas`] impl that routes `vello_gpu`.
 //!
 //! **The engine renders on the HOST's device and queue.** `from_metal` builds
 //! wgpu directly on the `MTLDevice`/`MTLCommandQueue` the app hands over, so
 //! the texture kine writes and the texture the compositor samples are the same
 //! device's by construction, and both sit on one queue — no cross-queue fence,
 //! and no blocking wait, is needed to order them.
+//!
+//! The `gpu-gles` flavor is the same venue on Android: `from_current_gles`
+//! builds wgpu's GLES backend on the EGL context CURRENT on the calling thread,
+//! and renders into a GL texture the host names. One context executes kine's
+//! commands and the host's in issue order, so again nothing waits.
 
 use std::sync::{Arc, Weak};
 
@@ -28,12 +33,11 @@ use crate::render::{self, Canvas, RunStyle};
 /// exactly like the CPU flavor's `Pixmap`, so hosts need no format branch.
 pub(crate) const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Total atlas area, in texels, that `vello_hybrid::Resources::new()` can hand
-/// out. Derived from `AtlasConfig::default()` because `Resources` gives no way
-/// to read (or set) its own config in 0.0.9 — if that constructor ever takes a
-/// config, this must follow it or the occupancy report goes silently wrong.
+/// Total atlas area, in texels, that the engine's `Resources` can hand out —
+/// the image atlas config [`render_settings`] gives the renderer, which makes
+/// the `Resources` it hands back.
 fn atlas_capacity() -> u64 {
-    let config = vello_hybrid::AtlasConfig::default();
+    let config = render_settings().memory_settings.image_atlas_config;
     let (width, height) = config.atlas_size;
     u64::from(width) * u64::from(height) * config.max_atlases as u64
 }
@@ -61,7 +65,7 @@ struct CachedImage {
     area: u64,
 }
 
-/// Process-wide GPU raster engine: wgpu device/queue + one `vello_hybrid`
+/// Process-wide GPU raster engine: wgpu device/queue + one `vello_gpu`
 /// renderer + the image atlas. Scenes stay per-document, per-render.
 pub(crate) struct GpuEngine {
     device: wgpu::Device,
@@ -69,8 +73,9 @@ pub(crate) struct GpuEngine {
     /// Built on first render, at that render's size, and reused after — the
     /// renderer re-configures itself when `RenderSize` changes, so one instance
     /// serves every document size.
-    renderer: Option<vello_hybrid::Renderer>,
-    resources: vello_hybrid::Resources,
+    renderer: Option<vello_gpu::Renderer>,
+    /// Made with the renderer: vello hands the two out as a pair.
+    resources: Option<vello_gpu::Resources>,
     images: Vec<CachedImage>,
     /// Padded atlas area held by live entries, and whether the occupancy warning
     /// has already fired for the current climb.
@@ -84,18 +89,25 @@ pub(crate) struct GpuEngine {
     /// Description of the adapter actually in use — reported through the log
     /// sink at init so a wrong-device or software-fallback situation is never
     /// silent.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     adapter: String,
+    /// The host context around a render — set by [`Self::from_current_gles`]
+    /// only.
+    #[cfg(feature = "gpu-gles")]
+    gl: Option<gl_state::HostGl>,
 }
 
 impl GpuEngine {
     /// Build on wgpu's own device — the parity harness and any host that has no
     /// device to lend. NOT the shipping path on iOS; see [`Self::from_metal`].
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(crate) fn new() -> Result<Self, String> {
         let instance = instance();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: None,
+            ..Default::default()
         }))
         .map_err(|e| format!("no GPU adapter: {e}"))?;
         let info = adapter.get_info();
@@ -152,6 +164,7 @@ impl GpuEngine {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: None,
+            ..Default::default()
         }))
         .map_err(|e| format!("no Metal adapter: {e}"))?;
         let info = adapter.get_info();
@@ -159,8 +172,14 @@ impl GpuEngine {
 
         // Timestamps are never queried, so the period is inert; 1.0 is the
         // value wgpu-hal itself uses for Apple silicon.
-        let hal_device =
-            unsafe { wgpu::hal::metal::Device::device_from_raw(raw_device, wgpu::Features::empty()) };
+        let descriptor = device_descriptor();
+        let hal_device = unsafe {
+            wgpu::hal::metal::Device::device_from_raw(
+                raw_device,
+                wgpu::Features::empty(),
+                &descriptor.required_limits,
+            )
+        };
         let hal_queue = unsafe { wgpu::hal::metal::Queue::queue_from_raw(raw_queue, 1.0) };
         let (device, queue) = unsafe {
             adapter.create_device_from_hal::<wgpu::hal::api::Metal>(
@@ -168,7 +187,7 @@ impl GpuEngine {
                     device: hal_device,
                     queue: hal_queue,
                 },
-                &device_descriptor(),
+                &descriptor,
             )
         }
         .map_err(|e| format!("GPU device from host Metal handles failed: {e}"))?;
@@ -180,28 +199,84 @@ impl GpuEngine {
         ))
     }
 
+    /// Build on the GLES context CURRENT on the calling thread (the host's
+    /// EGL context). Every later call into the engine — renders and the final
+    /// drop — must come from a thread where that same context is current.
+    ///
+    /// # Safety
+    /// An EGL context must be current on the calling thread.
+    #[cfg(feature = "gpu-gles")]
+    pub(crate) unsafe fn from_current_gles() -> Result<Self, String> {
+        let pending = unsafe { gl_state::take_errors() }?;
+        if !pending.is_empty() {
+            crate::log::emit(
+                crate::log::WARN,
+                &format!("GL {} pending before kine's engine — the host's, cleared", gl_state::describe(&pending)),
+            );
+        }
+        let exposed = unsafe {
+            wgpu::hal::gles::Adapter::new_external(gl_loader::proc_address, wgpu::GlBackendOptions::default())
+        }
+        .ok_or_else(|| "no GLES adapter on the current context — is an EGL context current?".to_string())?;
+        let instance = instance();
+        let adapter = unsafe { instance.create_adapter_from_hal(exposed) };
+        let info = adapter.get_info();
+        let limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("kine"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits,
+            ..Default::default()
+        }))
+        .map_err(|e| format!("GPU device on the host GLES context failed: {e}"))?;
+        // wgpu's capability probe asks for parameters a driver may not know —
+        // GL_INVALID_ENUM, nothing to act on. Anything else is a setup that failed.
+        let probed = unsafe { gl_state::take_errors() }?;
+        if probed.iter().any(|&error| error != gl_state::INVALID_ENUM) {
+            return Err(format!("GL {} creating the GPU device", gl_state::describe(&probed)));
+        }
+        if !probed.is_empty() {
+            crate::log::emit(
+                crate::log::INFO,
+                &format!("GL {} from wgpu's capability probe — cleared", gl_state::describe(&probed)),
+            );
+        }
+        let gl = unsafe { gl_state::HostGl::adopt(&device.limits()) }?;
+        let mut engine = Self::assemble(
+            device,
+            queue,
+            format!("host GLES context, {}", describe(&info)),
+        );
+        engine.gl = Some(gl);
+        Ok(engine)
+    }
+
     fn assemble(device: wgpu::Device, queue: wgpu::Queue, adapter: String) -> Self {
         crate::log::emit(crate::log::INFO, &format!("gpu engine on {adapter}"));
         Self {
             device,
             queue,
             renderer: None,
-            resources: vello_hybrid::Resources::new(),
+            resources: None,
             images: Vec::new(),
             atlas_used: 0,
             atlas_warned: false,
             #[cfg(test)]
             atlas_warnings: 0,
             adapter,
+            #[cfg(feature = "gpu-gles")]
+            gl: None,
         }
     }
 
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(crate) fn device(&self) -> &wgpu::Device {
         &self.device
     }
 
     /// What the engine is actually running on — reported so a wrong-device or
     /// software-fallback situation is never silent.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(crate) fn adapter(&self) -> &str {
         &self.adapter
     }
@@ -223,7 +298,8 @@ impl GpuEngine {
     ///    encoder as a frame's uploads therefore wipes what that frame just
     ///    uploaded. Its own encoder, submitted first, orders it unambiguously.
     fn evict_dead_images(&mut self) {
-        let Some(renderer) = self.renderer.as_mut() else {
+        let (Some(renderer), Some(resources)) = (self.renderer.as_mut(), self.resources.as_mut())
+        else {
             return;
         };
         let mut dead = Vec::new();
@@ -246,13 +322,7 @@ impl GpuEngine {
                 label: Some("kine gpu atlas evict"),
             });
         for id in dead {
-            renderer.destroy_image(
-                &mut self.resources,
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                id,
-            );
+            renderer.destroy_image(resources, &mut encoder, id);
         }
         self.queue.submit([encoder.finish()]);
     }
@@ -272,29 +342,33 @@ impl GpuEngine {
         self.evict_dead_images();
 
         if self.renderer.is_none() {
-            self.renderer = Some(vello_hybrid::Renderer::new(
+            let (renderer, resources) = vello_gpu::Renderer::new_with(
                 &self.device,
-                &vello_hybrid::RenderTargetConfig {
+                &vello_gpu::RenderTargetConfig {
                     format: TEXTURE_FORMAT,
-                    width,
-                    height,
+                    width: width as u16,
+                    height: height as u16,
                 },
-            ));
+                render_settings(),
+            );
+            self.renderer = Some(renderer);
+            self.resources = Some(resources);
         }
         // Split the borrows: the canvas holds renderer/resources/images while it
         // builds, then drops before the render pass reclaims them.
         let renderer = self.renderer.as_mut().expect("renderer built above");
+        let resources = self.resources.as_mut().expect("built with the renderer");
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kine gpu"),
             });
-        let mut hybrid = vello_hybrid::Scene::new(width as u16, height as u16);
+        let mut hybrid = vello_gpu::Scene::new(width as u16, height as u16);
         {
             let mut canvas = GpuCanvas {
                 scene: &mut hybrid,
-                resources: &mut self.resources,
+                resources: &mut *resources,
                 renderer,
                 device: &self.device,
                 queue: &self.queue,
@@ -315,16 +389,25 @@ impl GpuEngine {
         renderer
             .render(
                 &hybrid,
-                &mut self.resources,
+                resources,
                 &self.device,
                 &self.queue,
                 &mut encoder,
-                &vello_hybrid::RenderSize { width, height },
+                &vello_gpu::RenderSize {
+                    width: width as u16,
+                    height: height as u16,
+                },
                 view,
-                &vello_hybrid::TextureBindings::new(),
+                None,
+                &vello_gpu::TextureBindings::new(),
+                vello_gpu::TargetInit::Clear(vello_gpu::ClearSettings::default()),
             )
             .map_err(|e| format!("gpu render failed: {e}"))?;
         self.queue.submit([encoder.finish()]);
+        // GLES executes the submission on this thread as it is issued; a
+        // non-blocking poll lets wgpu retire the staging buffers it used.
+        #[cfg(feature = "gpu-gles")]
+        let _ = self.device.poll(wgpu::PollType::Poll);
         self.report_occupancy();
         Ok(())
     }
@@ -442,6 +525,7 @@ impl GpuEngine {
                     height,
                     depth: 1,
                 },
+                None,
             )
         };
         let wrapped = unsafe {
@@ -462,6 +546,115 @@ impl GpuEngine {
                         | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 },
+                // The render clears the target, so its contents on the way in
+                // are discardable.
+                wgpu::TextureUses::UNINITIALIZED,
+            )
+        };
+        let view = wrapped.create_view(&wgpu::TextureViewDescriptor::default());
+        self.render_to_view(scene, width, height, viewport, &view)
+    }
+
+    /// Rasterize into a GL texture the HOST created and owns, named by `texture`.
+    /// kine borrows it for the render and never deletes it.
+    ///
+    /// The texture must be a complete `GL_TEXTURE_2D` of `GL_RGBA8`, exactly
+    /// `width`×`height`, one level. GL cannot answer those questions without a
+    /// stall, so — unlike the Metal path — they are the caller's contract.
+    ///
+    /// On return — success or failure — the context is back at GLES defaults
+    /// for everything the render bound or enabled ([`gl_state::HostGl::leave`]),
+    /// and the GL errors the render raised are read and cleared: any one fails
+    /// it, since a target a pass could not draw into holds garbage.
+    ///
+    /// # Safety
+    /// The context the engine was built on must be current, and `texture` must
+    /// name a texture of that context (or its share group) matching the above.
+    #[cfg(feature = "gpu-gles")]
+    pub(crate) unsafe fn render_to_gl_texture(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+        viewport: (f64, f64),
+        texture: u32,
+    ) -> Result<(), String> {
+        validate_request(width, height, viewport)?;
+        let name = std::num::NonZeroU32::new(texture)
+            .ok_or_else(|| "gl texture name is 0".to_string())?;
+        let gl = self
+            .gl
+            .ok_or_else(|| "the engine was not built on a GLES context".to_string())?;
+        let pending = unsafe { gl.take_errors() };
+        if !pending.is_empty() {
+            crate::log::emit(
+                crate::log::WARN,
+                &format!("GL {} pending before a kine render — the host's, cleared", gl_state::describe(&pending)),
+            );
+        }
+        unsafe { gl.enter() };
+        let rendered = unsafe { self.render_into_gl(scene, width, height, viewport, name) };
+        unsafe { gl.leave() };
+        let raised = unsafe { gl.take_errors() };
+        match rendered {
+            Ok(()) if !raised.is_empty() => Err(format!(
+                "GL {} during the render — the frame is not trusted",
+                gl_state::describe(&raised)
+            )),
+            rendered => rendered,
+        }
+    }
+
+    /// [`Self::render_to_gl_texture`] inside the host context's bracket.
+    #[cfg(feature = "gpu-gles")]
+    unsafe fn render_into_gl(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+        viewport: (f64, f64),
+        name: std::num::NonZeroU32,
+    ) -> Result<(), String> {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let hal_texture = {
+            let hal_device = unsafe { self.device.as_hal::<wgpu::hal::api::Gles>() }
+                .ok_or_else(|| "the engine's device is not a GLES device".to_string())?;
+            let descriptor = wgpu::hal::TextureDescriptor {
+                label: Some("kine gpu host target"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TEXTURE_FORMAT,
+                usage: wgpu::TextureUses::COLOR_TARGET | wgpu::TextureUses::RESOURCE,
+                memory_flags: wgpu::hal::MemoryFlags::empty(),
+                view_formats: Vec::new(),
+            };
+            // A drop callback keeps ownership with the host: wgpu only deletes
+            // textures it was handed without one.
+            unsafe { hal_device.texture_from_raw(name, &descriptor, Some(Box::new(|| {}))) }
+        };
+        let wrapped = unsafe {
+            self.device.create_texture_from_hal::<wgpu::hal::api::Gles>(
+                hal_texture,
+                &wgpu::TextureDescriptor {
+                    label: Some("kine gpu host target"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: TEXTURE_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                // The render clears the target, so its contents on the way in
+                // are discardable.
+                wgpu::TextureUses::UNINITIALIZED,
             )
         };
         let view = wrapped.create_view(&wgpu::TextureViewDescriptor::default());
@@ -473,6 +666,7 @@ impl GpuEngine {
     ///
     /// This BLOCKS on GPU completion (S0 measured ~1.5 ms of round trip for that
     /// alone), so it is the parity harness's entry point, not a frame path.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub(crate) fn render_rgba(
         &mut self,
         scene: &Scene,
@@ -555,13 +749,14 @@ impl GpuEngine {
             .map_err(|e| format!("gpu readback map failed: {e}"))?;
 
         let mut out = Vec::with_capacity(width as usize * height as usize * 4);
-        for row in buffer
+        let mapped = buffer
             .slice(..)
             .get_mapped_range()
-            .chunks_exact(padded as usize)
-        {
+            .map_err(|e| format!("gpu readback range failed: {e}"))?;
+        for row in mapped.chunks_exact(padded as usize) {
             out.extend_from_slice(&row[..width as usize * 4]);
         }
+        drop(mapped);
         buffer.unmap();
         Ok(out)
     }
@@ -579,12 +774,279 @@ fn validate_request(width: u32, height: u32, viewport: (f64, f64)) -> Result<(),
     Ok(())
 }
 
+/// vello's defaults, except that a GLES image atlas page is 2048², not
+/// 4096²: a page is made on the first image and costs 16 MB instead of 64 on a
+/// phone.
+fn render_settings() -> vello_gpu::RenderSettings {
+    #[cfg_attr(not(feature = "gpu-gles"), allow(unused_mut))]
+    let mut settings = vello_gpu::RenderSettings::default();
+    #[cfg(feature = "gpu-gles")]
+    {
+        settings.memory_settings.image_atlas_config.atlas_size = (2048, 2048);
+    }
+    settings
+}
+
 fn instance() -> wgpu::Instance {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = wgpu::Backends::METAL;
+    descriptor.backends = if cfg!(feature = "gpu-gles") {
+        wgpu::Backends::GL
+    } else {
+        wgpu::Backends::METAL
+    };
     wgpu::Instance::new(descriptor)
 }
 
+/// GL entry points for wgpu's GLES backend on the host's context: the core
+/// functions straight from `libGLESv3.so`, the rest through `eglGetProcAddress`
+/// (which, before EGL 1.5, is not obliged to answer core names).
+#[cfg(feature = "gpu-gles")]
+mod gl_loader {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::sync::OnceLock;
+
+    extern "C" {
+        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+
+    #[link(name = "EGL")]
+    extern "C" {
+        fn eglGetProcAddress(procname: *const c_char) -> *const c_void;
+    }
+
+    const RTLD_NOW: c_int = 2;
+
+    fn gles() -> *mut c_void {
+        static LIBRARY: OnceLock<usize> = OnceLock::new();
+        *LIBRARY.get_or_init(|| unsafe { dlopen(c"libGLESv3.so".as_ptr(), RTLD_NOW) as usize }) as *mut c_void
+    }
+
+    pub(super) fn proc_address(name: &str) -> *const c_void {
+        let Ok(symbol) = CString::new(name) else {
+            return std::ptr::null();
+        };
+        unsafe {
+            let library = gles();
+            if !library.is_null() {
+                let direct = dlsym(library, symbol.as_ptr());
+                if !direct.is_null() {
+                    return direct;
+                }
+            }
+            eglGetProcAddress(symbol.as_ptr())
+        }
+    }
+}
+
+/// The host's context around a GLES render. wgpu's GLES backend assumes that
+/// the vertex array its device made stays bound and that the pixel store packs
+/// rows tightly; on the way out it leaves its own bindings, sampler objects,
+/// scissor and blend state, and row lengths behind. A host that never heard of
+/// them would draw scissored, sample through kine's samplers, or upload with
+/// kine's stride. [`HostGl::enter`] restores wgpu's assumptions, and
+/// [`HostGl::leave`] returns everything a render can touch to GLES defaults.
+#[cfg(feature = "gpu-gles")]
+mod gl_state {
+    use std::ffi::c_void;
+
+    use super::gl_loader::proc_address;
+
+    const ZERO: u32 = 0;
+    const ONE: u32 = 1;
+    const TEXTURE_2D: u32 = 0x0DE1;
+    const SCISSOR_TEST: u32 = 0x0C11;
+    const BLEND: u32 = 0x0BE2;
+    const UNPACK_ROW_LENGTH: u32 = 0x0CF2;
+    const UNPACK_ALIGNMENT: u32 = 0x0CF5;
+    const PACK_ROW_LENGTH: u32 = 0x0D02;
+    const PACK_ALIGNMENT: u32 = 0x0D05;
+    const FUNC_ADD: u32 = 0x8006;
+    const UNPACK_IMAGE_HEIGHT: u32 = 0x806E;
+    const TEXTURE0: u32 = 0x84C0;
+    const VERTEX_ARRAY_BINDING: u32 = 0x85B5;
+    const ARRAY_BUFFER: u32 = 0x8892;
+    const PIXEL_PACK_BUFFER: u32 = 0x88EB;
+    const PIXEL_UNPACK_BUFFER: u32 = 0x88EC;
+    const UNIFORM_BUFFER: u32 = 0x8A11;
+    const TEXTURE_2D_ARRAY: u32 = 0x8C1A;
+    const FRAMEBUFFER: u32 = 0x8D40;
+    const COPY_READ_BUFFER: u32 = 0x8F36;
+    const COPY_WRITE_BUFFER: u32 = 0x8F37;
+
+    /// Buffer targets a render can leave bound. The element array buffer is
+    /// vertex-array state and goes with the vertex array.
+    const BUFFER_TARGETS: [u32; 6] = [
+        ARRAY_BUFFER,
+        COPY_READ_BUFFER,
+        COPY_WRITE_BUFFER,
+        PIXEL_PACK_BUFFER,
+        PIXEL_UNPACK_BUFFER,
+        UNIFORM_BUFFER,
+    ];
+
+    #[derive(Clone, Copy)]
+    pub(super) struct HostGl {
+        use_program: unsafe extern "C" fn(u32),
+        bind_framebuffer: unsafe extern "C" fn(u32, u32),
+        bind_vertex_array: unsafe extern "C" fn(u32),
+        bind_buffer: unsafe extern "C" fn(u32, u32),
+        bind_buffer_base: unsafe extern "C" fn(u32, u32, u32),
+        active_texture: unsafe extern "C" fn(u32),
+        bind_texture: unsafe extern "C" fn(u32, u32),
+        bind_sampler: unsafe extern "C" fn(u32, u32),
+        disable: unsafe extern "C" fn(u32),
+        blend_equation: unsafe extern "C" fn(u32),
+        blend_func: unsafe extern "C" fn(u32, u32),
+        pixel_store: unsafe extern "C" fn(u32, i32),
+        get_error: unsafe extern "C" fn() -> u32,
+        /// wgpu's own vertex array, made and bound when its device opened.
+        vertex_array: u32,
+        /// Texture units and uniform-buffer slots a render can bind. wgpu
+        /// numbers both from 0 across a pipeline layout, which the device's
+        /// limits cap per stage — two stages. Within GLES 3.0's minimums (32
+        /// units, 24 slots) for the WebGL2 limits the engine requests.
+        texture_units: u32,
+        uniform_slots: u32,
+    }
+
+    impl HostGl {
+        /// Load the entry points, note the vertex array wgpu's device just
+        /// bound, and return the context to defaults.
+        ///
+        /// # Safety
+        /// The context the device was opened on must be current.
+        pub(super) unsafe fn adopt(limits: &wgpu::Limits) -> Result<Self, String> {
+            let get_integer: unsafe extern "C" fn(u32, *mut i32) = entry("glGetIntegerv")?;
+            let mut vertex_array = 0;
+            unsafe { get_integer(VERTEX_ARRAY_BINDING, &mut vertex_array) };
+            let raised = unsafe { take_errors() }?;
+            if !raised.is_empty() {
+                return Err(format!("GL {} reading the vertex array binding", describe(&raised)));
+            }
+            let gl = Self {
+                use_program: entry("glUseProgram")?,
+                bind_framebuffer: entry("glBindFramebuffer")?,
+                bind_vertex_array: entry("glBindVertexArray")?,
+                bind_buffer: entry("glBindBuffer")?,
+                bind_buffer_base: entry("glBindBufferBase")?,
+                active_texture: entry("glActiveTexture")?,
+                bind_texture: entry("glBindTexture")?,
+                bind_sampler: entry("glBindSampler")?,
+                disable: entry("glDisable")?,
+                blend_equation: entry("glBlendEquation")?,
+                blend_func: entry("glBlendFunc")?,
+                pixel_store: entry("glPixelStorei")?,
+                get_error: entry("glGetError")?,
+                vertex_array: vertex_array as u32,
+                texture_units: 2 * limits.max_sampled_textures_per_shader_stage,
+                uniform_slots: 2 * limits.max_uniform_buffers_per_shader_stage,
+            };
+            unsafe { gl.leave() };
+            let raised = unsafe { take_errors() }?;
+            if !raised.is_empty() {
+                return Err(format!("GL {} returning the context to defaults", describe(&raised)));
+            }
+            Ok(gl)
+        }
+
+        /// [`take_errors`] through the loaded entry point.
+        ///
+        /// # Safety
+        /// The engine's context must be current.
+        pub(super) unsafe fn take_errors(&self) -> Vec<u32> {
+            unsafe { drain(self.get_error) }
+        }
+
+        /// # Safety
+        /// The engine's context must be current.
+        pub(super) unsafe fn enter(&self) {
+            unsafe {
+                (self.bind_vertex_array)(self.vertex_array);
+                (self.pixel_store)(UNPACK_ALIGNMENT, 1);
+                (self.pixel_store)(PACK_ALIGNMENT, 1);
+            }
+        }
+
+        /// Program, framebuffer, vertex array and buffers unbound; textures and
+        /// samplers unbound on every unit a render can use, unit 0 active;
+        /// scissor test and blending off, blending back to `ADD`, `ONE, ZERO`;
+        /// pixel store at alignment 4 and row lengths 0. The viewport and the
+        /// scissor box stay at the last target's size.
+        ///
+        /// # Safety
+        /// The engine's context must be current.
+        pub(super) unsafe fn leave(&self) {
+            unsafe {
+                (self.use_program)(0);
+                (self.bind_framebuffer)(FRAMEBUFFER, 0);
+                (self.bind_vertex_array)(0);
+                for target in BUFFER_TARGETS {
+                    (self.bind_buffer)(target, 0);
+                }
+                for slot in 0..self.uniform_slots {
+                    (self.bind_buffer_base)(UNIFORM_BUFFER, slot, 0);
+                }
+                for unit in (0..self.texture_units).rev() {
+                    (self.active_texture)(TEXTURE0 + unit);
+                    (self.bind_texture)(TEXTURE_2D, 0);
+                    (self.bind_texture)(TEXTURE_2D_ARRAY, 0);
+                    (self.bind_sampler)(unit, 0);
+                }
+                (self.disable)(SCISSOR_TEST);
+                (self.disable)(BLEND);
+                (self.blend_equation)(FUNC_ADD);
+                (self.blend_func)(ONE, ZERO);
+                (self.pixel_store)(UNPACK_ALIGNMENT, 4);
+                (self.pixel_store)(PACK_ALIGNMENT, 4);
+                (self.pixel_store)(UNPACK_ROW_LENGTH, 0);
+                (self.pixel_store)(UNPACK_IMAGE_HEIGHT, 0);
+                (self.pixel_store)(PACK_ROW_LENGTH, 0);
+            }
+        }
+    }
+
+    pub(super) const INVALID_ENUM: u32 = 0x0500;
+
+    /// Read and clear the pending GL error flags — at most one per kind, so a
+    /// context that keeps answering is cut off.
+    ///
+    /// # Safety
+    /// A GL context must be current.
+    pub(super) unsafe fn take_errors() -> Result<Vec<u32>, String> {
+        Ok(unsafe { drain(entry("glGetError")?) })
+    }
+
+    unsafe fn drain(get_error: unsafe extern "C" fn() -> u32) -> Vec<u32> {
+        let mut errors = Vec::new();
+        while errors.len() < 8 {
+            match unsafe { get_error() } {
+                0 => break,
+                error => errors.push(error),
+            }
+        }
+        errors
+    }
+
+    /// `error 0x501` / `errors 0x500, 0x501`.
+    pub(super) fn describe(errors: &[u32]) -> String {
+        let codes: Vec<String> = errors.iter().map(|error| format!("0x{error:x}")).collect();
+        let noun = if errors.len() == 1 { "error" } else { "errors" };
+        format!("{noun} {}", codes.join(", "))
+    }
+
+    /// A GL entry point as the `extern "C"` signature `F` the caller names.
+    fn entry<F: Copy>(name: &str) -> Result<F, String> {
+        let address = proc_address(name);
+        if address.is_null() {
+            return Err(format!("GL entry point {name} is missing"));
+        }
+        assert_eq!(size_of::<F>(), size_of::<*const c_void>());
+        Ok(unsafe { std::mem::transmute_copy(&address) })
+    }
+}
+
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
 fn device_descriptor() -> wgpu::DeviceDescriptor<'static> {
     wgpu::DeviceDescriptor {
         label: Some("kine"),
@@ -597,12 +1059,12 @@ fn describe(info: &wgpu::AdapterInfo) -> String {
     format!("{:?}/{}", info.backend, info.name)
 }
 
-/// The `vello_hybrid` flavor. Holds the wgpu handles because image paints must
+/// The `vello_gpu` flavor. Holds the wgpu handles because image paints must
 /// reach the atlas mid-walk — see [`Canvas::set_paint_image`].
 struct GpuCanvas<'a> {
-    scene: &'a mut vello_hybrid::Scene,
-    resources: &'a mut vello_hybrid::Resources,
-    renderer: &'a mut vello_hybrid::Renderer,
+    scene: &'a mut vello_gpu::Scene,
+    resources: &'a mut vello_gpu::Resources,
+    renderer: &'a mut vello_gpu::Renderer,
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     encoder: &'a mut wgpu::CommandEncoder,
@@ -618,7 +1080,7 @@ impl GpuCanvas<'_> {
     /// Atlas id for a decoded frame, uploading on first sight.
     ///
     /// `Renderer::upload_image` UNWRAPS the allocation
-    /// (`vello_hybrid/src/render/wgpu.rs:596`), so an exhausted atlas is a panic
+    /// (`vello_gpu/src/render/wgpu/mod.rs`), so an exhausted atlas is a panic
     /// inside the renderer, not an error — measured: 32 live 2048×2048 assets,
     /// then `called Result::unwrap() on an Err value: AtlasLimitReached`. kine
     /// does not let that cross its boundary: the upload is caught and reported,
@@ -654,9 +1116,8 @@ impl GpuCanvas<'_> {
             crate::log::emit(crate::log::ERROR, &message);
             message
         })?;
-        // GLYPH_PADDING-style transparent padding rides every atlas allocation;
-        // vello_hybrid's IMAGE_PADDING is 1 texel per side.
-        let area = (u64::from(pixmap.width()) + 2) * (u64::from(pixmap.height()) + 2);
+        // vello_gpu 0.3.0 pads an atlas image by IMAGE_PADDING — 0 texels.
+        let area = u64::from(pixmap.width()) * u64::from(pixmap.height());
         self.images.push(CachedImage {
             pixmap: Arc::downgrade(pixmap),
             key,
@@ -737,11 +1198,12 @@ impl Canvas for GpuCanvas<'_> {
             .glyph_transform(linear)
             .hint(false);
         let glyphs = std::iter::once(glyph);
-        if stroke {
+        let drawn = if stroke {
             builder.stroke_glyphs(glyphs)
         } else {
             builder.fill_glyphs(glyphs)
-        }
+        };
+        render::report_blank_glyphs(drawn);
     }
 }
 

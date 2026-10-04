@@ -19,8 +19,9 @@ import org.junit.Test
 /**
  * Port of `swift/Tests/KineTests/KineTests.swift` (the CPU
  * half). The GPU classes there — `KineGPUTests`, `KineGPUMemoryProbe` — have no
- * counterpart: their flavor is vello_hybrid over Metal, and the builds
- * `kotlin/build.sh` produces carry no `kine_gpu_*` entry point to call.
+ * counterpart here: this is the host JVM's CPU build, and the GLES flavor the
+ * android lane builds needs an EGL context — its tests run on a device, in the
+ * host app.
  */
 class KineTests {
 
@@ -655,16 +656,15 @@ class KineTests {
     }
 
     /**
-     * The flavor `kotlin/build.sh` builds. `kine_gpu_available` is the one
-     * `kine_gpu_*` symbol a CPU build carries, which is why the header tells
-     * hosts to branch on it rather than probe for the others.
+     * The flavor `kotlin/build.sh host` builds. `kine_gpu_available` is the
+     * one `kine_gpu_*` symbol a CPU build carries, which is why the header
+     * tells hosts to branch on it rather than probe for the others.
      *
      * kill: add `--features gpu` to build.sh's host lane — the Metal tree links
-     * on the Mac, this answers true, and the Android lane (where wgpu/Metal
-     * cannot build at all) is the next thing to break.
+     * on the Mac and this answers true.
      */
     @Test
     fun gpuFlavorIsAbsentFromThisBuild() {
-        assertFalse(Kine.gpuAvailable, "the CPU flavor must not carry the Metal raster tree")
+        assertFalse(Kine.gpuAvailable, "the host CPU flavor must not carry a GPU raster tree")
     }
 }

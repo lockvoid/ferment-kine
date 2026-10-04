@@ -2724,7 +2724,7 @@ mod gpu_parity {
     }
 
     /// Embedded rasters are the ONE place the flavors diverge structurally:
-    /// vello_hybrid rejects `ImageSource::Pixmap` outright, so these prove the
+    /// vello_gpu rejects `ImageSource::Pixmap` outright, so these prove the
     /// atlas upload path, including an ANIMATED asset sampled at two times
     /// (two different frames of one asset, both atlas-resident).
     #[test]
@@ -2932,8 +2932,8 @@ mod gpu_parity {
     ///
     /// Measured (S2): `Renderer::upload_image` unwraps the allocation, so 32
     /// live 2048x2048 assets — the ceiling of 8 atlases x 4096^2 — make
-    /// vello_hybrid panic with `AtlasLimitReached`
-    /// (`vello_hybrid/src/render/wgpu.rs:596`). kine catches it at the upload.
+    /// vello panic with `AtlasLimitReached` (`Renderer::upload_image` in
+    /// `vello_gpu/src/render/wgpu/mod.rs`). kine catches it at the upload.
     ///
     /// The sibling failure, `AtlasError::TextureTooLarge`, is UNREACHABLE through
     /// a document: `assets.rs` caps an embedded image at 2048x2048 (MAX_DIM), so

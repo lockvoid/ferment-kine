@@ -6,9 +6,10 @@
 #   android  arm64-v8a cdylib → kine-android/src/main/jniLibs/arm64-v8a/
 #            libkine.so, packaged by :kine-android.
 #
-# Both flavors are CPU-only: `--features gpu` is the vello_hybrid/wgpu Metal
-# tree (scripts/build-xcframework.sh builds it for the Apple slices), so
-# kine_gpu_available() answers 0 here and no kine_gpu_* symbol exists to bind.
+# The host lane is CPU-only: kine_gpu_available() answers 0 there. The android
+# lane builds `--features gpu-gles`, vello_hybrid over wgpu's GLES backend on
+# the host's EGL context — the twin of the Metal `gpu` flavor that
+# scripts/build-xcframework.sh builds for the Apple slices.
 #
 # The crate's rust-toolchain.toml governs; --locked means its Cargo.lock is
 # law. Build products are gitignored — regenerate after any crate change.
@@ -35,7 +36,7 @@ build_android() {
   # 16 KB page alignment (Android 15+, NDK r28 default) comes from the NDK's
   # linker, so cargo-ndk must see it — hence the ANDROID_NDK_HOME requirement.
   ( cd "$CRATE" && rustup target add aarch64-linux-android >/dev/null &&
-    cargo ndk -t arm64-v8a -o "$HERE/kine-android/src/main/jniLibs" build --release --locked )
+    cargo ndk -t arm64-v8a -o "$HERE/kine-android/src/main/jniLibs" build --release --locked --features gpu-gles )
   echo "android: $HERE/kine-android/src/main/jniLibs/arm64-v8a/libkine.so"
 }
 

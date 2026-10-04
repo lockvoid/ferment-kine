@@ -5,7 +5,7 @@
 //!
 //! The scene walk is generic over [`Canvas`], the one seam between kine and a
 //! rasterizer. `vello_cpu` backs it here (server, posters, fallback); `gpu.rs`
-//! backs it with `vello_hybrid` on device. There is exactly ONE `draw_*`
+//! backs it with `vello_gpu` on device. There is exactly ONE `draw_*`
 //! implementation, so a document cannot drift between the two flavors.
 
 use std::sync::Arc;
@@ -40,7 +40,7 @@ pub(crate) trait Canvas {
     fn set_transform(&mut self, affine: Affine);
     fn set_paint(&mut self, paint: impl Into<PaintType>);
     /// Image paints are the ONE place the flavors diverge. vello_cpu samples a
-    /// `Pixmap` in place; vello_hybrid takes atlas-resident images only
+    /// `Pixmap` in place; vello_gpu takes atlas-resident images only
     /// (`ImageSource::Pixmap` is an `unimplemented!()` panic there), so the
     /// CANVAS resolves the source, never the caller.
     fn set_paint_image(&mut self, pixmap: &Arc<Pixmap>, sampler: ImageSampler);
@@ -125,19 +125,59 @@ impl Canvas for CpuCanvas<'_> {
             .glyph_transform(linear)
             .hint(false);
         let glyphs = std::iter::once(glyph);
-        if stroke {
+        let drawn = if stroke {
             builder.stroke_glyphs(glyphs)
         } else {
             builder.fill_glyphs(glyphs)
+        };
+        report_blank_glyphs(drawn);
+    }
+}
+
+/// A glyph vello has no way to draw (a bitmap or color glyph it cannot decode,
+/// or one with no outline) renders blank, as it always has; the rest of the run
+/// still draws. The first one is reported through the sink — once per process,
+/// since the same glyph comes back every frame.
+pub(crate) fn report_blank_glyphs(drawn: Result<(), impl std::fmt::Display>) {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if let Err(error) = drawn {
+        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::log::emit(crate::log::WARN, &format!("{error} — drawn blank"));
         }
     }
 }
 
 /// Render to a PNG blob (RGBA8, straight/un-premultiplied alpha per PNG).
+///
+/// Encoded here, not by vello's `Pixmap::into_png`, which writes RGB for an
+/// opaque pixmap: the blob is RGBA8 for every render.
 pub fn render_png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    render_pixmap(scene, width, height, (0.0, scene.height))?
-        .into_png()
-        .map_err(|e| format!("PNG encoding failed: {e}"))
+    let pixmap = render_pixmap(scene, width, height, (0.0, scene.height))?;
+    encode_png(&pixmap).map_err(|e| format!("PNG encoding failed: {e}"))
+}
+
+fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>, png::EncodingError> {
+    let straight: Vec<u8> = pixmap.data().iter().flat_map(|pixel| unpremultiply(*pixel)).collect();
+    let mut data = Vec::new();
+    let mut encoder = png::Encoder::new(&mut data, u32::from(pixmap.width()), u32::from(pixmap.height()));
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&straight)?;
+    writer.finish()?;
+    Ok(data)
+}
+
+/// vello 0.0.9's rounding (`Pixmap::take_unpremultiplied`), kept so a PNG's
+/// bytes move only where the raster does.
+fn unpremultiply(pixel: vello_cpu::peniko::color::PremulRgba8) -> [u8; 4] {
+    let vello_cpu::peniko::color::PremulRgba8 { r, g, b, a } = pixel;
+    if a == 0 {
+        return [r, g, b, a];
+    }
+    let alpha = 255.0 / f32::from(a);
+    let channel = |component: u8| (f32::from(component) * alpha + 0.5) as u8;
+    [channel(r), channel(g), channel(b), a]
 }
 
 /// Render a vertical design-space VIEWPORT `(view_y, view_h)` of the scene
@@ -233,7 +273,7 @@ fn render_pixmap(
 
     let mut pixmap = Pixmap::new(width as u16, height as u16);
     ctx.flush();
-    ctx.render_to_pixmap(&mut resources, &mut pixmap);
+    ctx.render(&mut pixmap, &mut resources);
     Ok(pixmap)
 }
 

@@ -193,6 +193,55 @@ int32_t kine_gpu_render_document_viewport(int64_t engine, int64_t document,
                                           double view_y, double view_h,
                                           void *mtl_texture);
 
+/* ---- GPU flavor (Android, built with --features gpu-gles) ----------------- */
+
+/* The same flavor over wgpu's GLES backend. The engine is built on the EGL
+ * context CURRENT on the calling thread and renders into a GL texture the HOST
+ * creates and owns. kine's commands run in that context in issue order with the
+ * host's own, so a render submits and returns; the host's next draw samples the
+ * finished pixels. Every call on a GLES engine — renders and the final
+ * kine_gpu_engine_destroy — must come from a thread where that context is
+ * current, and an engine is destroyed before its context.
+ *
+ * Creating the engine and every render — success or failure — leave the
+ * context at GLES defaults for everything kine binds or enables: program,
+ * framebuffer, vertex array and buffer bindings (indexed uniform slots
+ * included) unbound; textures and sampler objects unbound on units 0-31, unit 0
+ * active; scissor test and blending off, blending back to GL_FUNC_ADD, GL_ONE,
+ * GL_ZERO; pixel store alignment 4, row lengths and image height 0. The
+ * viewport and scissor box stay at the last target's size. A host that keeps
+ * other state current re-establishes it.
+ *
+ * kine reads the GL errors it raises, so none reaches the host's next check.
+ * Creating the engine clears GL_INVALID_ENUM from wgpu's capability probe; any
+ * other error fails the creation. A render that raised any error fails (-1):
+ * a pass that could not draw leaves garbage in the target. Errors already
+ * pending at either point are the host's — logged through the sink and
+ * cleared.
+ *
+ * Output and parity are those of the Apple flavor above. */
+
+/* Create the GPU engine on the calling thread's current EGL context. Returns the
+ * handle (> 0), or 0 on failure — see kine_last_error(). Free with
+ * kine_gpu_engine_destroy, with the same context current. */
+int64_t kine_gpu_gles_engine_create(void);
+
+/* Rasterize a document handle at time `t` into a host-owned GL texture. Returns
+ * 0 on success, -1 on failure (see kine_last_error()). `gl_texture` must name a
+ * complete GL_TEXTURE_2D of GL_RGBA8, exactly width x height, one level, of the
+ * engine's context or its share group — the caller's contract, since GL cannot
+ * check it without a stall. On ANY failure the texture is left untouched. */
+int32_t kine_gpu_gles_render_document(int64_t engine, int64_t document, double t,
+                                      const char *signals_json, uint32_t width,
+                                      uint32_t height, uint32_t gl_texture);
+
+/* kine_gpu_gles_render_document over a vertical design-space viewport. */
+int32_t kine_gpu_gles_render_document_viewport(int64_t engine, int64_t document,
+                                               double t, const char *signals_json,
+                                               uint32_t width, uint32_t height,
+                                               double view_y, double view_h,
+                                               uint32_t gl_texture);
+
 /* ---- shared ------------------------------------------------------------- */
 
 /* Release a buffer returned by any kine_* function above. */

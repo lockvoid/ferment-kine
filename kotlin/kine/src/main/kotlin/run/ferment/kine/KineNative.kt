@@ -27,12 +27,14 @@ internal class KineBuf : Structure(), Structure.ByValue {
  * — the single source of truth every host binding links against. Methods carry
  * the C symbol names because JNA resolves by name.
  *
- * Not declared here: `kine_gpu_engine_create`, `kine_gpu_engine_destroy`,
- * `kine_gpu_render_document`, `kine_gpu_render_document_viewport`. Those exist
- * only in a `--features gpu` build (Metal, Apple-only); the builds this repo
- * links carry none of them, which is precisely why the header promises
- * [kine_gpu_available] is ALWAYS present and tells hosts to branch on it
- * instead of probing for symbols.
+ * The GPU entry points exist only in a GPU build. The Metal ones
+ * (`kine_gpu_engine_create`, `kine_gpu_render_document`,
+ * `kine_gpu_render_document_viewport`) are Apple-only and not declared here;
+ * the GLES ones are, and only the Android build (`kotlin/build.sh android`)
+ * carries them. JNA looks a symbol up on its method's first call, so declaring
+ * them costs the host's CPU build nothing as long as callers branch on
+ * [kine_gpu_available] first — which is why the header promises that one is
+ * ALWAYS present.
  *
  * Threading (the header's contract): document handles are immutable after
  * creation, so concurrent renders from any thread are safe; the font collection
@@ -125,6 +127,24 @@ internal interface KineNative : Library {
 
     /** 1 when this build carries the GPU flavor, 0 otherwise. Always present. */
     fun kine_gpu_available(): Int
+
+    /** GLES flavor: the engine on the calling thread's current EGL context (> 0), or 0 on error. */
+    fun kine_gpu_gles_engine_create(): Long
+
+    /** Destroy a GPU engine, its context current. Idempotent. GPU builds only. */
+    fun kine_gpu_engine_destroy(engine: Long)
+
+    /** GLES flavor: render a handle at `t` into a host-owned GL texture. 0 on success, -1 on error. */
+    fun kine_gpu_gles_render_document(
+        engine: Long, document: Long, t: Double, signals_json: String?, width: Int, height: Int,
+        gl_texture: Int,
+    ): Int
+
+    /** [kine_gpu_gles_render_document] over a vertical design-space viewport. */
+    fun kine_gpu_gles_render_document_viewport(
+        engine: Long, document: Long, t: Double, signals_json: String?, width: Int, height: Int,
+        view_y: Double, view_h: Double, gl_texture: Int,
+    ): Int
 
     /** Release a buffer returned by any `kine_*` function above. */
     fun kine_buf_free(buf: KineBuf)

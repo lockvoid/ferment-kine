@@ -15,7 +15,7 @@ mod capi;
 mod error;
 mod eval;
 mod fonts;
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "gpu-gles"))]
 mod gpu;
 mod handle;
 mod log;

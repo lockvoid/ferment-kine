@@ -339,16 +339,86 @@ object Kine {
             }
             return RenderedFrame(data = data, width = width, height = height)
         }
+
+        /**
+         * Rasterize into a GL texture YOU own and created in [engine]'s context
+         * (or its share group): `GL_TEXTURE_2D`, `GL_RGBA8`, exactly
+         * [width]×[height], one level. GL cannot check those without a stall,
+         * so they are the caller's contract.
+         *
+         * SUBMITS AND RETURNS: kine's commands run in the engine's context in
+         * order with the caller's, so the next draw that samples [texture] sees
+         * the finished pixels. The context comes back at GLES defaults for
+         * everything kine bound or enabled (kine.h lists them).
+         *
+         * Throws on any failure and leaves the texture untouched, so the caller
+         * can fall back to [renderRGBA] for that frame.
+         */
+        fun render(
+            t: Double, signals: Map<String, Any?> = emptyMap(), width: Int, height: Int,
+            engine: GPUEngine, texture: Int,
+        ) {
+            val json = signalsJSON(signals)
+            val code = callingNative {
+                KineNative.INSTANCE.kine_gpu_gles_render_document(
+                    engine.handle, handle, t, json, width, height, texture,
+                )
+            }
+            if (code != 0) throw KineError.current("gpu render failed")
+        }
+
+        /** [render] over a vertical design-space viewport — pair with [layoutSize] as with [renderRGBAViewport]. */
+        fun render(
+            t: Double, signals: Map<String, Any?> = emptyMap(), width: Int, height: Int,
+            viewY: Double, viewHeight: Double, engine: GPUEngine, texture: Int,
+        ) {
+            val json = signalsJSON(signals)
+            val code = callingNative {
+                KineNative.INSTANCE.kine_gpu_gles_render_document_viewport(
+                    engine.handle, handle, t, json, width, height, viewY, viewHeight, texture,
+                )
+            }
+            if (code != 0) throw KineError.current("gpu viewport render failed")
+        }
     }
 
     /**
-     * Whether this build carries the GPU raster flavor. False here by
-     * construction: the flavor is vello_hybrid over wgpu/Metal, so the host and
-     * Android builds `kotlin/build.sh` produces are CPU-only and carry no
-     * `kine_gpu_*` entry point beyond this one. Read through the ABI rather
-     * than hard-coded because the header promises exactly that.
+     * Whether this build carries the GPU raster flavor: true in the Android
+     * build (`kotlin/build.sh android`, vello_hybrid over wgpu/GLES), false in
+     * the host JVM's CPU build. Read through the ABI rather than hard-coded
+     * because the header promises exactly that.
      */
     val gpuAvailable: Boolean get() = KineNative.INSTANCE.kine_gpu_available() == 1
+
+    /**
+     * The GPU raster venue, built on the EGL context CURRENT on the calling
+     * thread — Swift's `GPUEngine(device:commandQueue:)` on GLES. That context
+     * runs kine's commands in issue order with the host's own, so a render
+     * submits and returns. Create ONE per context — it owns the image atlas and
+     * the renderer — and keep it for as long as you render there.
+     *
+     * Every call, [close] included, must come from a thread where that context
+     * is current, and [close] must run before the context is destroyed. No
+     * [Cleaner] backs it: a cleaning thread has no context current to delete
+     * the engine's GL objects in, so an engine never closed stays allocated
+     * until the process ends.
+     *
+     * Throws if this build has no GPU flavor or wgpu cannot be built on the
+     * current context.
+     */
+    class GPUEngine : AutoCloseable {
+        internal val handle: Long
+
+        init {
+            if (!gpuAvailable) throw KineError.Failed("this kine build has no GPU flavor")
+            val handle = KineNative.INSTANCE.kine_gpu_gles_engine_create()
+            if (handle == 0L) throw KineError.current("gpu engine creation failed")
+            this.handle = handle
+        }
+
+        /** Destroy the engine and its GL objects. Idempotent. */
+        override fun close() = KineNative.INSTANCE.kine_gpu_engine_destroy(handle)
+    }
 }
 
 /** Copy a `kine_buf` into a [ByteArray] and free it. Throws the core's last error on the null sentinel. */

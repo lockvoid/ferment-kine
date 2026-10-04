@@ -13,8 +13,9 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use base64::Engine;
-use color::PremulRgba8;
 use image::{AnimationDecoder, ImageDecoder};
+use vello_common::pixmap::PixelMetadata;
+use vello_cpu::peniko::ImageAlphaType;
 use vello_cpu::Pixmap;
 
 use crate::schema::{Asset, ImageMime, SchemaError};
@@ -314,21 +315,21 @@ fn check_dims(width: u32, height: u32, path: &str) -> Result<(), SchemaError> {
 /// pure-Rust decoder hands back straight alpha, so this pass is mandatory).
 fn premultiply(rgba: &image::RgbaImage) -> Pixmap {
     let (width, height) = rgba.dimensions();
-    let pixels: Vec<PremulRgba8> = rgba
+    let pixels: Vec<u8> = rgba
         .pixels()
-        .map(|pixel| {
+        .flat_map(|pixel| {
             let [r, g, b, a] = pixel.0;
             let alpha = a as u16;
             let mul = |c: u8| ((alpha * c as u16) / 255) as u8;
-            PremulRgba8 {
-                r: mul(r),
-                g: mul(g),
-                b: mul(b),
-                a,
-            }
+            [mul(r), mul(g), mul(b), a]
         })
         .collect();
-    Pixmap::from_parts(pixels, width as u16, height as u16)
+    Pixmap::from_parts(
+        pixels,
+        width as u16,
+        height as u16,
+        PixelMetadata::new(ImageAlphaType::AlphaPremultiplied, true),
+    )
 }
 
 fn decode_err(path: &str, mime: ImageMime, error: impl std::fmt::Display) -> SchemaError {

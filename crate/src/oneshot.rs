@@ -47,7 +47,7 @@ pub fn render_png_cpu(
     crate::render::render_png(&scene, width, height)
 }
 
-/// GPU-flavor one-shot render to PNG bytes (vello_hybrid over wgpu/Metal) —
+/// GPU-flavor one-shot render to PNG bytes (vello_gpu over wgpu/Metal) —
 /// the flavor the app's live preview runs.
 #[cfg(feature = "gpu")]
 pub fn render_png_gpu(

@@ -22,26 +22,29 @@ panic = "unwind"
 
 [features]
 default = []
-# The GPU raster flavor (vello_hybrid over wgpu/Metal). OFF by default: the ruby
+# The GPU raster flavor (vello_gpu over wgpu/Metal). OFF by default: the ruby
 # gem and the rails server build the CPU flavor and must never pull the wgpu
 # tree. `scripts/build-xcframework.sh` builds WITH it; `ext/kine/extconf.rb`
 # builds WITHOUT it, unchanged.
-gpu = ["dep:vello_hybrid", "dep:wgpu", "dep:pollster", "dep:objc2", "dep:objc2-metal"]
+gpu = ["dep:vello_gpu", "dep:wgpu", "wgpu/metal", "dep:pollster", "dep:objc2", "dep:objc2-metal"]
+# The same flavor over wgpu's GLES backend, on the HOST's current EGL context —
+# Android's twin of `gpu`. `kotlin/build.sh android` builds WITH it.
+gpu-gles = ["dep:vello_gpu", "dep:wgpu", "wgpu/gles", "dep:pollster"]
 
 [dependencies]
-vello_cpu = { version = "=0.0.9", features = ["text", "png", "multithreading"] }
-# Same 0.0.9 workspace release as vello_cpu — one vello_common in the lock, so
+vello_cpu = { version = "=0.3.0", features = ["text", "png", "multithreading"] }
+# Same 0.3.0 workspace release as vello_cpu — one vello_common in the lock, so
 # scene/strip geometry is shared and only the RASTER back-end differs.
-vello_hybrid = { version = "=0.0.9", default-features = false, features = [
+vello_gpu = { version = "=0.3.0", default-features = false, features = [
     "wgpu",
     "text",
 ], optional = true }
-# Metal ONLY — deliberately NOT vello_hybrid's `wgpu_default`, which turns on
-# every backend and drags the Vulkan (ash) and GLES (glow) trees into a static
-# library that can never reach them. Depending on wgpu directly with default
-# features off is the customization path vello_hybrid documents.
-wgpu = { version = "=29.0.3", default-features = false, features = [
-    "metal",
+# ONE backend per flavor — deliberately NOT vello_gpu's `wgpu_default`, which
+# turns on every backend and drags the Vulkan (ash) and GLES (glow) trees into a
+# library that can never reach them. `gpu` turns on Metal, `gpu-gles` GLES.
+# Depending on wgpu directly with default features off is the customization path
+# vello_gpu documents.
+wgpu = { version = "=30.0.0", default-features = false, features = [
     "wgsl",
     "std",
 ], optional = true }
@@ -49,7 +52,7 @@ wgpu = { version = "=29.0.3", default-features = false, features = [
 pollster = { version = "0.4", optional = true }
 # Same version as vello_cpu's own dependency (single copy in the lock); provides
 # the filter-effects types push_layer takes, which vello_cpu doesn't re-export.
-vello_common = "=0.0.9"
+vello_common = "=0.3.0"
 parley = { version = "=0.11", default-features = false, features = ["std"] }
 # Bundled fonts only — no `system` feature, so headless server/iOS never touch a
 # platform font source. Registration goes through the global collection.
@@ -65,18 +68,18 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Wraps parse errors with the failing JSON path ("animators[2].keyframes[0].ease")
 # — the schema contract promises path-carrying errors.
 serde_path_to_error = "0.1"
+# The PNG blob is encoded here as RGBA8 (render.rs `encode_png`); same release
+# vello_common pulls, so one copy in the lock.
+png = "0.18"
 
 # The engine is handed the HOST's MTLDevice + MTLCommandQueue, so wgpu renders
 # on the app's device by construction rather than asserting identity after the
-# fact. Versions are wgpu-hal 29.0.3's own pins — the raw handoff must speak the
+# fact. Versions are wgpu-hal 30.0.1's own pins — the raw handoff must speak the
 # SAME crate instances wgpu-hal's signatures do, or the types don't unify.
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { version = "0.6.3", optional = true }
 objc2-metal = { version = "0.3.2", optional = true }
 
-[dev-dependencies]
-# Decode our own PNG output in tests to assert dimensions + non-transparency.
-png = "0.18"
 
 [patch.crates-io]
 # `image` 0.25.10 pulls image-webp 0.2.4, which has two animated-WebP compositing
