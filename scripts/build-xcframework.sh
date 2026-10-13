@@ -39,7 +39,7 @@ module KineCore {
 }
 EOF
 
-# --features gpu: the Apple slices carry the vello_hybrid/wgpu raster flavor.
+# --features gpu: the Apple slices carry the vello_gpu/wgpu raster flavor.
 # Deliberately NOT the default feature set — the ruby gem builds this same crate
 # without it and must never link the wgpu tree (see crate/Cargo.toml).
 args=()

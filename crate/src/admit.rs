@@ -24,7 +24,11 @@ pub struct Repair {
 impl Repair {
     fn new(path: String, rule: &'static str, detail: String) -> Self {
         let message = format!("{path}: {detail}");
-        Repair { path, rule, message }
+        Repair {
+            path,
+            rule,
+            message,
+        }
     }
 }
 
@@ -133,7 +137,11 @@ fn settle_envelopes(document: &mut Value, repairs: &mut Vec<Repair>) {
             continue;
         }
         input["default"] = json!(settled as u8);
-        let plays = if key == "inProgress" { "an entrance" } else { "an exit" };
+        let plays = if key == "inProgress" {
+            "an entrance"
+        } else {
+            "an exit"
+        };
         repairs.push(Repair::new(
             format!("inputs[{index}].default"),
             "settled-envelope",
@@ -176,7 +184,10 @@ fn declare_host_signals(document: &mut Value, repairs: &mut Vec<Repair>) {
         if declared.contains(&signal) || !given.insert(signal.clone()) {
             continue;
         }
-        let default = match HOST_ENVELOPES.iter().find(|(envelope, _)| *envelope == signal) {
+        let default = match HOST_ENVELOPES
+            .iter()
+            .find(|(envelope, _)| *envelope == signal)
+        {
             Some(&(_, settled)) => json!(settled as u8),
             None if kind == "time" => json!(0),
             None => json!([]),
@@ -191,7 +202,9 @@ fn declare_host_signals(document: &mut Value, repairs: &mut Vec<Repair>) {
     if declarations.is_empty() {
         return;
     }
-    let fields = document.as_object_mut().expect("a parsed document is an object");
+    let fields = document
+        .as_object_mut()
+        .expect("a parsed document is an object");
     fields
         .entry("inputs")
         .or_insert_with(|| json!([]))

@@ -329,7 +329,10 @@ impl<'de, 'a, T> serde::de::Visitor<'de> for OneOfVisitor<'a, T> {
         use serde::de::Error as _;
 
         let Some(key) = map.next_key::<String>()? else {
-            return Err(M::Error::custom(format!("empty object — expected {}", self.expecting)));
+            return Err(M::Error::custom(format!(
+                "empty object — expected {}",
+                self.expecting
+            )));
         };
         let value: String = map.next_value()?;
         let parsed = (self.on_key)(&key, value).ok_or_else(|| {
@@ -369,7 +372,13 @@ impl<'de> Deserialize<'de> for ColorRef {
         deserializer.deserialize_any(OneOfVisitor {
             expecting: "a color: \"#rrggbbaa\" or a CSS name, the key of an EARLIER \
                         colors entry, or {\"input\": \"<color input key>\"}",
-            on_str: &|s: String| if s.starts_with('#') { ColorRef::Literal(s) } else { ColorRef::Entry(s) },
+            on_str: &|s: String| {
+                if s.starts_with('#') {
+                    ColorRef::Literal(s)
+                } else {
+                    ColorRef::Entry(s)
+                }
+            },
             keys: &["input"],
             on_key: &|key: &str, value: String| match key {
                 "input" => Some(ColorRef::Input(value)),
@@ -395,7 +404,8 @@ impl<'de> Deserialize<'de> for ColorValue {
         // author who carries the shape spelling into a text style used to be
         // told only "data did not match any variant of untagged enum Raw".
         deserializer.deserialize_any(OneOfVisitor {
-            expecting: "a color: \"#rrggbbaa\" or a CSS name, {\"color\": \"<colors entry key>\"}, \
+            expecting:
+                "a color: \"#rrggbbaa\" or a CSS name, {\"color\": \"<colors entry key>\"}, \
                         or {\"input\": \"<color input key>\"} — \
                         {\"kind\":\"solid\",…} belongs on a SHAPE's fill, not on a text style's",
             on_str: &ColorValue::Literal,

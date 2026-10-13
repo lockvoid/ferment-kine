@@ -7,8 +7,8 @@ property values. The document renders standalone using input defaults.
 
 Wire format: JSON, camelCase, UTF-8. Parsing is STRICT: unknown fields,
 unknown enum values, duplicate keys, and unresolvable references are hard
-errors. The server is the only writer; strictness catches authoring bugs at
-write time, never on device.
+errors. Validate authored documents before distribution; validation also runs
+when a document is loaded for rendering.
 
 ## 1. Root
 
@@ -420,9 +420,11 @@ shorter). Gamut-map at output, never clamp mid-interpolation.
    static per input set); per-unit deltas apply at draw time per glyph
    run; animated assets sample their frame by the §4 rule.
 
-Determinism: identical document + identical signals ⇒ identical pixels,
-on every platform, forever. No randomness at render (stagger `random` is
-seeded and baked at load), no clocks, no environment reads.
+Evaluation is deterministic for the same document and signals. There is no
+randomness at render (stagger `random` is seeded and baked at load), no clock,
+and no environment reads. Exact raster output is verified with pinned renderer
+versions on the reference architecture; other backends and architectures have
+the comparison limits described in the root README.
 
 ## 8. Validation (load-time hard errors)
 

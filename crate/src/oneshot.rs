@@ -10,11 +10,7 @@ fn compile(doc_json: &str) -> Result<Compiled, String> {
     crate::validate::validate(doc).map_err(|e| e.to_string())
 }
 
-fn scene(
-    compiled: &Compiled,
-    signals_json: &str,
-    t: f64,
-) -> Result<crate::eval::Scene, String> {
+fn scene(compiled: &Compiled, signals_json: &str, t: f64) -> Result<crate::eval::Scene, String> {
     let signals: serde_json::Value = if signals_json.trim().is_empty() {
         serde_json::Value::Null
     } else {
@@ -48,7 +44,7 @@ pub fn render_png_cpu(
 }
 
 /// GPU-flavor one-shot render to PNG bytes (vello_gpu over wgpu/Metal) —
-/// the flavor the app's live preview runs.
+/// Available when the `gpu` feature is enabled.
 #[cfg(feature = "gpu")]
 pub fn render_png_gpu(
     doc_json: &str,

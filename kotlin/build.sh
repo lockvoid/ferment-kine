@@ -7,7 +7,7 @@
 #            libkine.so, packaged by :kine-android.
 #
 # The host lane is CPU-only: kine_gpu_available() answers 0 there. The android
-# lane builds `--features gpu-gles`, vello_hybrid over wgpu's GLES backend on
+# lane builds `--features gpu-gles`, vello_gpu over wgpu's GLES backend on
 # the host's EGL context — the twin of the Metal `gpu` flavor that
 # scripts/build-xcframework.sh builds for the Apple slices.
 #

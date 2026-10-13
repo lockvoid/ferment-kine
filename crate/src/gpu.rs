@@ -1,5 +1,5 @@
 //! The GPU raster flavor: `vello_gpu` over wgpu/Metal. Behind the `gpu`
-//! feature, which the ruby gem and the rails server never enable — they build
+//! feature, which the ruby gem and CPU-only servers never enable — they build
 //! the CPU flavor and must not pull the wgpu tree.
 //!
 //! This module owns NO drawing. The scene walk lives once in [`crate::render`]
@@ -19,12 +19,12 @@
 
 use std::sync::{Arc, Weak};
 
+use vello_common::filter_effects::Filter;
 use vello_common::paint::{Image, ImageId, ImageSource, PaintType};
 use vello_common::pixmap::Pixmap;
 use vello_cpu::kurbo::{Affine, BezPath, Rect, Stroke};
 use vello_cpu::peniko::ImageSampler;
 use vello_cpu::Glyph;
-use vello_common::filter_effects::Filter;
 
 use crate::eval::Scene;
 use crate::render::{self, Canvas, RunStyle};
@@ -89,7 +89,7 @@ pub(crate) struct GpuEngine {
     /// Description of the adapter actually in use — reported through the log
     /// sink at init so a wrong-device or software-fallback situation is never
     /// silent.
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    #[cfg(test)]
     adapter: String,
     /// The host context around a render — set by [`Self::from_current_gles`]
     /// only.
@@ -211,13 +211,21 @@ impl GpuEngine {
         if !pending.is_empty() {
             crate::log::emit(
                 crate::log::WARN,
-                &format!("GL {} pending before kine's engine — the host's, cleared", gl_state::describe(&pending)),
+                &format!(
+                    "GL {} pending before kine's engine — the host's, cleared",
+                    gl_state::describe(&pending)
+                ),
             );
         }
         let exposed = unsafe {
-            wgpu::hal::gles::Adapter::new_external(gl_loader::proc_address, wgpu::GlBackendOptions::default())
+            wgpu::hal::gles::Adapter::new_external(
+                gl_loader::proc_address,
+                wgpu::GlBackendOptions::default(),
+            )
         }
-        .ok_or_else(|| "no GLES adapter on the current context — is an EGL context current?".to_string())?;
+        .ok_or_else(|| {
+            "no GLES adapter on the current context — is an EGL context current?".to_string()
+        })?;
         let instance = instance();
         let adapter = unsafe { instance.create_adapter_from_hal(exposed) };
         let info = adapter.get_info();
@@ -233,12 +241,18 @@ impl GpuEngine {
         // GL_INVALID_ENUM, nothing to act on. Anything else is a setup that failed.
         let probed = unsafe { gl_state::take_errors() }?;
         if probed.iter().any(|&error| error != gl_state::INVALID_ENUM) {
-            return Err(format!("GL {} creating the GPU device", gl_state::describe(&probed)));
+            return Err(format!(
+                "GL {} creating the GPU device",
+                gl_state::describe(&probed)
+            ));
         }
         if !probed.is_empty() {
             crate::log::emit(
                 crate::log::INFO,
-                &format!("GL {} from wgpu's capability probe — cleared", gl_state::describe(&probed)),
+                &format!(
+                    "GL {} from wgpu's capability probe — cleared",
+                    gl_state::describe(&probed)
+                ),
             );
         }
         let gl = unsafe { gl_state::HostGl::adopt(&device.limits()) }?;
@@ -263,20 +277,16 @@ impl GpuEngine {
             atlas_warned: false,
             #[cfg(test)]
             atlas_warnings: 0,
+            #[cfg(test)]
             adapter,
             #[cfg(feature = "gpu-gles")]
             gl: None,
         }
     }
 
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
-    pub(crate) fn device(&self) -> &wgpu::Device {
-        &self.device
-    }
-
     /// What the engine is actually running on — reported so a wrong-device or
     /// software-fallback situation is never silent.
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn adapter(&self) -> &str {
         &self.adapter
     }
@@ -529,27 +539,28 @@ impl GpuEngine {
             )
         };
         let wrapped = unsafe {
-            self.device.create_texture_from_hal::<wgpu::hal::api::Metal>(
-                hal_texture,
-                &wgpu::TextureDescriptor {
-                    label: Some("kine gpu host target"),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
+            self.device
+                .create_texture_from_hal::<wgpu::hal::api::Metal>(
+                    hal_texture,
+                    &wgpu::TextureDescriptor {
+                        label: Some("kine gpu host target"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: TEXTURE_FORMAT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
                     },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: TEXTURE_FORMAT,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
-                // The render clears the target, so its contents on the way in
-                // are discardable.
-                wgpu::TextureUses::UNINITIALIZED,
-            )
+                    // The render clears the target, so its contents on the way in
+                    // are discardable.
+                    wgpu::TextureUses::UNINITIALIZED,
+                )
         };
         let view = wrapped.create_view(&wgpu::TextureViewDescriptor::default());
         self.render_to_view(scene, width, height, viewport, &view)
@@ -580,8 +591,8 @@ impl GpuEngine {
         texture: u32,
     ) -> Result<(), String> {
         validate_request(width, height, viewport)?;
-        let name = std::num::NonZeroU32::new(texture)
-            .ok_or_else(|| "gl texture name is 0".to_string())?;
+        let name =
+            std::num::NonZeroU32::new(texture).ok_or_else(|| "gl texture name is 0".to_string())?;
         let gl = self
             .gl
             .ok_or_else(|| "the engine was not built on a GLES context".to_string())?;
@@ -589,7 +600,10 @@ impl GpuEngine {
         if !pending.is_empty() {
             crate::log::emit(
                 crate::log::WARN,
-                &format!("GL {} pending before a kine render — the host's, cleared", gl_state::describe(&pending)),
+                &format!(
+                    "GL {} pending before a kine render — the host's, cleared",
+                    gl_state::describe(&pending)
+                ),
             );
         }
         unsafe { gl.enter() };
@@ -819,7 +833,8 @@ mod gl_loader {
 
     fn gles() -> *mut c_void {
         static LIBRARY: OnceLock<usize> = OnceLock::new();
-        *LIBRARY.get_or_init(|| unsafe { dlopen(c"libGLESv3.so".as_ptr(), RTLD_NOW) as usize }) as *mut c_void
+        *LIBRARY.get_or_init(|| unsafe { dlopen(c"libGLESv3.so".as_ptr(), RTLD_NOW) as usize })
+            as *mut c_void
     }
 
     pub(super) fn proc_address(name: &str) -> *const c_void {
@@ -922,7 +937,10 @@ mod gl_state {
             unsafe { get_integer(VERTEX_ARRAY_BINDING, &mut vertex_array) };
             let raised = unsafe { take_errors() }?;
             if !raised.is_empty() {
-                return Err(format!("GL {} reading the vertex array binding", describe(&raised)));
+                return Err(format!(
+                    "GL {} reading the vertex array binding",
+                    describe(&raised)
+                ));
             }
             let gl = Self {
                 use_program: entry("glUseProgram")?,
@@ -945,7 +963,10 @@ mod gl_state {
             unsafe { gl.leave() };
             let raised = unsafe { take_errors() }?;
             if !raised.is_empty() {
-                return Err(format!("GL {} returning the context to defaults", describe(&raised)));
+                return Err(format!(
+                    "GL {} returning the context to defaults",
+                    describe(&raised)
+                ));
             }
             Ok(gl)
         }
@@ -1246,12 +1267,4 @@ pub(crate) fn remove_engine(id: i64) {
     if let Ok(mut map) = engines().write() {
         map.remove(&id);
     }
-}
-
-#[cfg(test)]
-pub(crate) fn engine_exists(id: i64) -> bool {
-    engines()
-        .read()
-        .map(|map| map.contains_key(&id))
-        .unwrap_or(false)
 }

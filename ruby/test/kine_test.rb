@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-# Runs standalone (no Rails needed):
-#   ruby -Ilib vendor/ferment-kine/test/kine_test.rb
+# Run from ruby/ after building the native extension:
+#   ruby -Ilib test/kine_test.rb
 #
 # Exercises the real FFI seams against the v1 schema: probe interface, document
 # rendering with signals, schema errors with paths, thread safety (blocking

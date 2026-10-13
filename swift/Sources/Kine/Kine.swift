@@ -322,7 +322,7 @@ private func signalsJSON(_ signals: [String: Any]) throws -> String {
 
     extension Kine {
         /// Whether this build carries the GPU raster flavor. A CPU-only build of
-        /// the core (the ruby gem, the rails server) has none of the GPU entry
+        /// the core (the ruby gem, CPU-only servers) has none of the GPU entry
         /// points; the xcframework is always built with them.
         public static var gpuAvailable: Bool { kine_gpu_available() == 1 }
 

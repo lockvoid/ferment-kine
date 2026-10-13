@@ -40,7 +40,9 @@ fn main() {
             "--signals" => signals = expect(args.next(), "--signals needs json"),
             "--size" => {
                 let raw = expect(args.next(), "--size needs WxH");
-                let (w, h) = raw.split_once('x').unwrap_or_else(|| usage("--size needs WxH"));
+                let (w, h) = raw
+                    .split_once('x')
+                    .unwrap_or_else(|| usage("--size needs WxH"));
                 size = Some((
                     w.parse().unwrap_or_else(|_| usage("--size needs WxH")),
                     h.parse().unwrap_or_else(|_| usage("--size needs WxH")),
@@ -88,7 +90,10 @@ fn main() {
                 eprintln!("cannot write {out}: {e}");
                 exit(2)
             });
-            println!("{backend}: rendered {width}x{height} -> {out} ({} bytes)", png.len());
+            println!(
+                "{backend}: rendered {width}x{height} -> {out} ({} bytes)",
+                png.len()
+            );
         }
         Err(error) => {
             eprintln!("{backend}: RENDER ERROR: {error}");
@@ -98,7 +103,13 @@ fn main() {
 }
 
 #[cfg(feature = "gpu")]
-fn render_gpu(doc: &str, t: f64, signals: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
+fn render_gpu(
+    doc: &str,
+    t: f64,
+    signals: &str,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
     kine::oneshot::render_png_gpu(doc, t, signals, width, height)
 }
 

@@ -23,7 +23,7 @@ panic = "unwind"
 [features]
 default = []
 # The GPU raster flavor (vello_gpu over wgpu/Metal). OFF by default: the ruby
-# gem and the rails server build the CPU flavor and must never pull the wgpu
+# gem and CPU-only server hosts must not pull the wgpu
 # tree. `scripts/build-xcframework.sh` builds WITH it; `ext/kine/extconf.rb`
 # builds WITHOUT it, unchanged.
 gpu = ["dep:vello_gpu", "dep:wgpu", "wgpu/metal", "dep:pollster", "dep:objc2", "dep:objc2-metal"]

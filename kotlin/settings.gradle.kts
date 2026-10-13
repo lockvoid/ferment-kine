@@ -1,6 +1,6 @@
 // The Kotlin binding of the kine core, beside the header it mirrors
-// (`../crate/include/kine.h`). Standalone: `./gradlew :kine:test`. The Android
-// app includes these two modules into its own build from `KINE_ROOT`.
+// (`../crate/include/kine.h`). Build the host library with `./build.sh host`
+// before running `./gradlew :kine:test`.
 pluginManagement {
     repositories {
         google()

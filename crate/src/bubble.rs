@@ -84,7 +84,11 @@ fn walk_group(path: &mut BezPath, rects: &mut [Rect], radius: f64) {
     // Clockwise ring: top edge → right side down → bottom edge → left side up.
     path.move_to((ls[0].x + r_tl, top_y));
     path.line_to((rs[0].x - r_tr, top_y));
-    corner(path, Point::new(rs[0].x, top_y), Point::new(rs[0].x, top_y + r_tr));
+    corner(
+        path,
+        Point::new(rs[0].x, top_y),
+        Point::new(rs[0].x, top_y + r_tr),
+    );
 
     for i in 0..rs.len() - 1 {
         let (a, b) = (&rs[i], &rs[i + 1]);
@@ -94,17 +98,29 @@ fn walk_group(path: &mut BezPath, rects: &mut [Rect], radius: f64) {
         let dir = (b.x - a.x).signum();
         let step = a.y1;
         path.line_to((a.x, step - ra));
-        corner(path, Point::new(a.x, step), Point::new(a.x + dir * ra, step));
+        corner(
+            path,
+            Point::new(a.x, step),
+            Point::new(a.x + dir * ra, step),
+        );
         path.line_to((b.x - dir * rb, step));
         corner(path, Point::new(b.x, step), Point::new(b.x, step + rb));
     }
 
     let last_r = &rs[rs.len() - 1];
     path.line_to((last_r.x, bottom_y - r_br));
-    corner(path, Point::new(last_r.x, bottom_y), Point::new(last_r.x - r_br, bottom_y));
+    corner(
+        path,
+        Point::new(last_r.x, bottom_y),
+        Point::new(last_r.x - r_br, bottom_y),
+    );
     let last_l = &ls[ls.len() - 1];
     path.line_to((last_l.x + r_bl, bottom_y));
-    corner(path, Point::new(last_l.x, bottom_y), Point::new(last_l.x, bottom_y - r_bl));
+    corner(
+        path,
+        Point::new(last_l.x, bottom_y),
+        Point::new(last_l.x, bottom_y - r_bl),
+    );
 
     for i in (1..ls.len()).rev() {
         let (a, b) = (&ls[i - 1], &ls[i]);
@@ -114,13 +130,21 @@ fn walk_group(path: &mut BezPath, rects: &mut [Rect], radius: f64) {
         let dir = (a.x - b.x).signum();
         let step = b.y0;
         path.line_to((b.x, step + rb));
-        corner(path, Point::new(b.x, step), Point::new(b.x + dir * rb, step));
+        corner(
+            path,
+            Point::new(b.x, step),
+            Point::new(b.x + dir * rb, step),
+        );
         path.line_to((a.x - dir * ra, step));
         corner(path, Point::new(a.x, step), Point::new(a.x, step - ra));
     }
 
     path.line_to((ls[0].x, top_y + r_tl));
-    corner(path, Point::new(ls[0].x, top_y), Point::new(ls[0].x + r_tl, top_y));
+    corner(
+        path,
+        Point::new(ls[0].x, top_y),
+        Point::new(ls[0].x + r_tl, top_y),
+    );
     path.close_path();
 }
 
@@ -150,10 +174,18 @@ fn side_segments(rects: &[Rect], right: bool) -> Vec<Seg> {
         } else if sticks_out(last.x, x) {
             let step = rect.y0.max(last.y0);
             last.y1 = step;
-            segs.push(Seg { x, y0: step, y1: rect.y1 });
+            segs.push(Seg {
+                x,
+                y0: step,
+                y1: rect.y1,
+            });
         } else {
             let step = last.y1.min(rect.y1);
-            segs.push(Seg { x, y0: step, y1: rect.y1 });
+            segs.push(Seg {
+                x,
+                y0: step,
+                y1: rect.y1,
+            });
         }
     }
     segs
@@ -205,7 +237,10 @@ fn corner(path: &mut BezPath, k: Point, to: Point) {
     if (from.x - to.x).abs() <= EPS && (from.y - to.y).abs() <= EPS {
         return;
     }
-    let c1 = Point::new(from.x + (k.x - from.x) * KAPPA, from.y + (k.y - from.y) * KAPPA);
+    let c1 = Point::new(
+        from.x + (k.x - from.x) * KAPPA,
+        from.y + (k.y - from.y) * KAPPA,
+    );
     let c2 = Point::new(to.x + (k.x - to.x) * KAPPA, to.y + (k.y - to.y) * KAPPA);
     path.curve_to(c1, c2, to);
 }
@@ -233,7 +268,10 @@ mod tests {
     #[test]
     fn equal_width_lines_fuse_into_one_flush_slab() {
         let path = backdrop_path(
-            &[Rect::new(0.0, 0.0, 200.0, 60.0), Rect::new(0.0, 50.0, 200.0, 110.0)],
+            &[
+                Rect::new(0.0, 0.0, 200.0, 60.0),
+                Rect::new(0.0, 50.0, 200.0, 110.0),
+            ],
             10.0,
         );
         assert!(contains(&path, 100.0, 55.0), "junction interior");
@@ -248,10 +286,16 @@ mod tests {
     fn near_equal_edges_snap_flush() {
         // Deltas of 8 < 2×radius: the narrow line's backdrop widens to match.
         let path = backdrop_path(
-            &[Rect::new(0.0, 0.0, 200.0, 60.0), Rect::new(8.0, 50.0, 192.0, 110.0)],
+            &[
+                Rect::new(0.0, 0.0, 200.0, 60.0),
+                Rect::new(8.0, 50.0, 192.0, 110.0),
+            ],
             10.0,
         );
-        assert!(contains(&path, 196.0, 100.0), "snapped edge covers the delta");
+        assert!(
+            contains(&path, 196.0, 100.0),
+            "snapped edge covers the delta"
+        );
         assert!(contains(&path, 4.0, 100.0), "left edge snapped too");
         assert!(!contains(&path, 201.0, 100.0));
     }
@@ -261,16 +305,28 @@ mod tests {
         // Bottom wider by 50 per side (≥ 2×radius): a true step with an
         // S-join. The flare ADDS a curved wedge the strict union lacks.
         let path = backdrop_path(
-            &[Rect::new(50.0, 0.0, 350.0, 60.0), Rect::new(0.0, 50.0, 400.0, 120.0)],
+            &[
+                Rect::new(50.0, 0.0, 350.0, 60.0),
+                Rect::new(0.0, 50.0, 400.0, 120.0),
+            ],
             10.0,
         );
         assert!(contains(&path, 100.0, 55.0), "junction interior");
         // Inside the flare: just outside the strict union near the notch.
-        assert!(contains(&path, 351.5, 48.5), "right flare bridges the notch");
+        assert!(
+            contains(&path, 351.5, 48.5),
+            "right flare bridges the notch"
+        );
         assert!(contains(&path, 48.5, 48.5), "left flare bridges the notch");
         // Beyond the flare arc (on its circle-center side): outside.
-        assert!(!contains(&path, 358.0, 42.0), "right notch stays open past the arc");
-        assert!(!contains(&path, 42.0, 42.0), "left notch stays open past the arc");
+        assert!(
+            !contains(&path, 358.0, 42.0),
+            "right notch stays open past the arc"
+        );
+        assert!(
+            !contains(&path, 42.0, 42.0),
+            "left notch stays open past the arc"
+        );
         // The wide line's own corners are convex-rounded as usual.
         assert!(!contains(&path, 398.5, 51.5), "wide corner rounded");
     }
@@ -278,12 +334,18 @@ mod tests {
     #[test]
     fn disjoint_lines_are_separate_blobs_of_one_path() {
         let path = backdrop_path(
-            &[Rect::new(0.0, 0.0, 200.0, 50.0), Rect::new(0.0, 100.0, 200.0, 150.0)],
+            &[
+                Rect::new(0.0, 0.0, 200.0, 50.0),
+                Rect::new(0.0, 100.0, 200.0, 150.0),
+            ],
             10.0,
         );
         assert!(contains(&path, 100.0, 25.0));
         assert!(contains(&path, 100.0, 125.0));
-        assert!(!contains(&path, 100.0, 75.0), "the gap between blobs stays empty");
+        assert!(
+            !contains(&path, 100.0, 75.0),
+            "the gap between blobs stays empty"
+        );
     }
 
     #[test]
@@ -300,7 +362,10 @@ mod tests {
         assert!(contains(&path, 200.0, 85.0));
         assert!(contains(&path, 200.0, 145.0));
         assert!(contains(&path, 261.5, 48.5), "flare at the top junction");
-        assert!(contains(&path, 281.5, 121.5), "flare at the bottom junction");
+        assert!(
+            contains(&path, 281.5, 121.5),
+            "flare at the bottom junction"
+        );
     }
 
     #[test]

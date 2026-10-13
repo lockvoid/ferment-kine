@@ -1,18 +1,35 @@
 # Contributing
 
-Open source, not open governance. Issues and small, focused PRs are welcome.
+Issues, bug reports, and focused pull requests are welcome. For a larger change,
+open an issue first so we can agree on scope before you spend time implementing it.
 
-- **Discuss before building anything large.** Open an issue first; unsolicited
-  large PRs may not be merged.
-- **The schema is maintainer-driven.** `crate/docs/SCHEMA.md` is normative;
-  changes to the wire format are decided by the maintainers, not by PR.
-- **No roadmap promises.** Features land when they're needed by a real consumer.
-- **Keep it green.** `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
-  `cargo test` must pass; goldens are byte-exact on the same architecture (see the
-  cross-arch note in the README). Regenerate goldens only on pinned-version bumps
-  with `KINE_REGEN_GOLDENS=1`.
-- **Determinism is the contract.** No clocks, randomness (beyond seeded+baked), or
-  environment reads at render.
+## Changes to the format
 
-By contributing you agree to license your work under the repo's dual
-MIT/Apache-2.0 terms.
+[crate/docs/SCHEMA.md](crate/docs/SCHEMA.md) is the normative specification.
+Maintainers decide schema changes; discuss a new field or behavior before
+changing the format. Include a concrete use case and describe how existing
+documents would behave.
+
+Rendering must remain deterministic: no clocks, unseeded randomness, or
+environment reads during frame evaluation. Seeded animation is baked at load.
+
+## Validate a change
+
+Run these commands from `crate/`:
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+Run the affected binding tests when changing the C ABI or a language wrapper.
+The binding guides describe the required native builds.
+
+Golden images are exact comparisons on the reference architecture. Regenerate
+them only for an agreed pinned-version change, with `KINE_REGEN_GOLDENS=1`.
+Explain any pixel changes in the pull request; do not regenerate images just
+to make a failed test pass. The [README](README.md#rendering-and-reproducibility)
+explains the cross-architecture and GPU comparison limits.
+
+Contributions are licensed under the repository's MIT/Apache-2.0 terms.

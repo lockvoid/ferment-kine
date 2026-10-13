@@ -1,5 +1,4 @@
-# The aliases the two modules use, at the Android app's versions: when the app
-# includes them, its own catalog answers the same names.
+# Pinned dependencies shared by the JVM and Android modules.
 [versions]
 agp = "9.4.0"
 kotlin = "2.4.10"

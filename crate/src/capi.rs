@@ -365,10 +365,18 @@ fn ink_union_impl(
             .map_err(|e| e.to_string())?;
         let (view_top, view_bottom) = render::grown_extents(&rest);
         let view_h = view_bottom - view_top;
-        let count = if samples <= 1 || span <= 0.0 { 1 } else { samples };
+        let count = if samples <= 1 || span <= 0.0 {
+            1
+        } else {
+            samples
+        };
         let mut union: Option<(u32, u32, u32, u32)> = None;
         for i in 0..count {
-            let t = if count == 1 { 0.0 } else { span * (i as f64) / ((count - 1) as f64) };
+            let t = if count == 1 {
+                0.0
+            } else {
+                span * (i as f64) / ((count - 1) as f64)
+            };
             let scene = crate::eval::evaluate(&compiled.doc, &compiled.assets, &signals, t)
                 .map_err(|e| e.to_string())?;
             let rgba = render::render_rgba_viewport(&scene, width, height, view_top, view_h)?;
@@ -589,6 +597,8 @@ fn parse_json(text: &str, what: &str) -> Result<serde_json::Value, String> {
 /// the renderer). Free with `kine_gpu_engine_destroy`.
 #[cfg(all(feature = "gpu", target_vendor = "apple"))]
 #[no_mangle]
+// C callers supply live Metal objects under the pointer contract in kine.h.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn kine_gpu_engine_create(
     mtl_device: *mut std::ffi::c_void,
     mtl_queue: *mut std::ffi::c_void,
@@ -841,9 +851,12 @@ fn gpu_render(
 }
 
 /// Whether this build carries the GPU flavor at all. Hosts branch on this
-/// instead of probing for a symbol: the ruby gem and the rails server link a
+/// instead of probing for a symbol: the ruby gem and CPU-only servers link a
 /// CPU-only build where every `kine_gpu_*` entry point is absent.
 #[no_mangle]
 pub extern "C" fn kine_gpu_available() -> i32 {
-    i32::from(cfg!(any(all(feature = "gpu", target_vendor = "apple"), feature = "gpu-gles")))
+    i32::from(cfg!(any(
+        all(feature = "gpu", target_vendor = "apple"),
+        feature = "gpu-gles"
+    )))
 }

@@ -104,7 +104,11 @@ struct NodeInfo {
 pub const HOST_ENVELOPES: [(&str, f64); 2] = [("inProgress", 1.0), ("outProgress", 0.0)];
 
 fn envelope_rule(key: &str, settled: f64) -> String {
-    let plays = if key == "inProgress" { "an entrance" } else { "an exit" };
+    let plays = if key == "inProgress" {
+        "an entrance"
+    } else {
+        "an exit"
+    };
     format!(
         "{key} defaults to {settled} — a host envelope rests settled: the host drives it only while \
          {plays} plays, and motion the document drives itself rides \"time\""

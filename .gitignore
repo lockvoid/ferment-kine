@@ -23,3 +23,24 @@
 /kotlin/kine-android/build/
 /kotlin/kine-android/src/main/jniLibs/
 /kotlin/local.properties
+
+# Local configuration and credentials.
+.env
+.env.*
+!.env.example
+local.properties
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Runtime databases and logs.
+*.db
+*.sqlite*
+*.log
+
+# Editor and operating-system files.
+.idea/
+*.iml

@@ -351,7 +351,10 @@ fn probe_reports_referenced_and_missing_fonts() {
         interface["fonts"],
         serde_json::json!(["Bebas Neue", "Missing Grotesk"])
     );
-    assert_eq!(interface["missingFonts"], serde_json::json!(["Missing Grotesk"]));
+    assert_eq!(
+        interface["missingFonts"],
+        serde_json::json!(["Missing Grotesk"])
+    );
 }
 
 #[test]
@@ -445,7 +448,10 @@ fn backdrop_alphas(png: &[u8], width: usize) -> Vec<u8> {
     buf[..frame.buffer_size()]
         .chunks_exact(4)
         .filter(|p| {
-            p[3] > 0 && (0x18..=0x30).contains(&p[0]) && (0x88..=0xB8).contains(&p[1]) && p[2] >= 0xE8
+            p[3] > 0
+                && (0x18..=0x30).contains(&p[0])
+                && (0x88..=0xB8).contains(&p[1])
+                && p[2] >= 0xE8
         })
         .map(|p| p[3])
         .collect()
@@ -538,7 +544,11 @@ fn explicit_newlines_break_words_so_each_line_hugs_its_own_hull() {
             rows.push((y, x));
         }
     }
-    assert!(rows.len() > 100, "expected a two-line slab, got {} rows", rows.len());
+    assert!(
+        rows.len() > 100,
+        "expected a two-line slab, got {} rows",
+        rows.len()
+    );
     let top_row = rows[rows.len() / 4];
     let bottom_row = rows[rows.len() * 3 / 4];
     assert!(
@@ -716,7 +726,9 @@ static CAPTURED_LOGS: std::sync::Mutex<Vec<(i32, String)>> = std::sync::Mutex::n
 static LOG_SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_log_sink() -> std::sync::MutexGuard<'static, ()> {
-    LOG_SINK_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    LOG_SINK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 extern "C" fn capture_log(level: i32, message: *const std::ffi::c_char) {
@@ -806,7 +818,10 @@ fn a_declared_fallback_renders_the_missing_family_and_warns_once() {
 
     // The door stays strict: probe still names the family missing.
     let interface = probe(doc).unwrap();
-    assert_eq!(interface["missingFonts"], serde_json::json!(["Fallback Probe Grotesk"]));
+    assert_eq!(
+        interface["missingFonts"],
+        serde_json::json!(["Fallback Probe Grotesk"])
+    );
 
     // And with the fallback cleared, the strict error is back.
     let strict = take(render(doc, 0.0, "{}", 64, 64));
@@ -1416,13 +1431,22 @@ fn a_color_refusal_names_the_path_and_what_was_expected() {
 
     // What the message must carry: the offending KEY, the shapes that are
     // accepted, and where the spelling the author used does belong.
-    assert!(message.contains("\"kind\""), "names the offending key, got: {message}");
-    assert!(message.contains("color") && message.contains("input"),
-            "names what a text fill takes, got: {message}");
-    assert!(message.contains("SHAPE"),
-            "says where the paint spelling belongs instead, got: {message}");
-    assert!(!message.contains("untagged"),
-            "no serde internals in an authoring message, got: {message}");
+    assert!(
+        message.contains("\"kind\""),
+        "names the offending key, got: {message}"
+    );
+    assert!(
+        message.contains("color") && message.contains("input"),
+        "names what a text fill takes, got: {message}"
+    );
+    assert!(
+        message.contains("SHAPE"),
+        "says where the paint spelling belongs instead, got: {message}"
+    );
+    assert!(
+        !message.contains("untagged"),
+        "no serde internals in an authoring message, got: {message}"
+    );
 
     // KNOWN GAP, not an accident: the path stops at `root` rather than
     // `root.children[0].style.fill`, because `Node` is `#[serde(tag = "kind")]`
@@ -1430,7 +1454,10 @@ fn a_color_refusal_names_the_path_and_what_was_expected() {
     // what drops `serde_path_to_error`'s trail. Naming the node needs `Node`
     // hand-visited too; until then the message says WHAT is wrong without
     // saying WHICH node.
-    assert!(message.contains("root"), "points into the document, got: {message}");
+    assert!(
+        message.contains("root"),
+        "points into the document, got: {message}"
+    );
 }
 
 /// The same treatment for the leaf a colors ENTRY takes.
@@ -1447,8 +1474,14 @@ fn a_color_ref_refusal_names_what_it_takes() {
         .expect_err("an unknown binding key is not a color ref")
         .to_string();
 
-    assert!(message.contains("colors[0]"), "names the entry, got: {message}");
-    assert!(!message.contains("untagged"), "no serde internals, got: {message}");
+    assert!(
+        message.contains("colors[0]"),
+        "names the entry, got: {message}"
+    );
+    assert!(
+        !message.contains("untagged"),
+        "no serde internals, got: {message}"
+    );
 }
 
 /// Eight hex digits do not say where the alpha byte lives, and an author who
@@ -1461,7 +1494,13 @@ fn any_css_color_spelling_parses() {
     let parse = crate::validate::parse_color;
     let opaque_dark_brown = parse("#3e2723ff").unwrap();
 
-    for spelling in ["#3E2723", "#3e2723", "#3e2723ff", "rgb(62, 39, 35)", "rgba(62, 39, 35, 1)"] {
+    for spelling in [
+        "#3E2723",
+        "#3e2723",
+        "#3e2723ff",
+        "rgb(62, 39, 35)",
+        "rgba(62, 39, 35, 1)",
+    ] {
         let color = parse(spelling).unwrap_or_else(|| panic!("{spelling} did not parse"));
         for channel in 0..4 {
             assert!(
@@ -1475,17 +1514,31 @@ fn any_css_color_spelling_parses() {
     let white = parse("white").unwrap();
     assert!((white.components[0] - 1.0).abs() < 1e-6);
     assert!((white.components[3] - 1.0).abs() < 1e-6);
-    assert!(parse("darkslategray").is_some(), "the x11 palette is in scope");
+    assert!(
+        parse("darkslategray").is_some(),
+        "the x11 palette is in scope"
+    );
 
     // Short form, and the same value with an alpha nibble.
     let short = parse("#fff").unwrap();
     assert!((short.components[0] - 1.0).abs() < 1e-6);
     assert!((short.components[3] - 1.0).abs() < 1e-6);
     let half = parse("#ffff0080").unwrap();
-    assert!((half.components[3] - 0.5).abs() < 0.01, "alpha is the LAST byte");
+    assert!(
+        (half.components[3] - 0.5).abs() < 0.01,
+        "alpha is the LAST byte"
+    );
 
     // Still refused: the shapes that mean nothing.
-    for junk in ["", "  ", "#", "#12345", "not-a-color", "0x3e2723", "#3e2723f"] {
+    for junk in [
+        "",
+        "  ",
+        "#",
+        "#12345",
+        "not-a-color",
+        "0x3e2723",
+        "#3e2723f",
+    ] {
         assert!(parse(junk).is_none(), "{junk:?} must not parse");
     }
 }
@@ -2328,8 +2381,15 @@ fn ink_union_reports_content_rect_and_unions_across_motion() {
     assert!(handle > 0, "{}", last_error());
 
     // Resting probe: rect fractions of the design box.
-    let rest = take(crate::capi::kine_document_ink_union(handle, std::ptr::null(), 1, 0.0, 120, 80))
-        .expect("resting ink");
+    let rest = take(crate::capi::kine_document_ink_union(
+        handle,
+        std::ptr::null(),
+        1,
+        0.0,
+        120,
+        80,
+    ))
+    .expect("resting ink");
     let rest: serde_json::Value = serde_json::from_slice(&rest).unwrap();
     let close = |v: &serde_json::Value, key: &str, want: f64| {
         let got = v[key].as_f64().unwrap();
@@ -2343,8 +2403,15 @@ fn ink_union_reports_content_rect_and_unions_across_motion() {
     // Union across the sweep widens toward the full travel. Samples land at
     // t = 0, .2, .4, .6, .8, 1.0 and the time driver wraps at its period
     // (t = 1.0 ≡ 0), so the farthest sampled offset is 32px → right edge 92.
-    let union = take(crate::capi::kine_document_ink_union(handle, std::ptr::null(), 6, 1.0, 120, 80))
-        .expect("union ink");
+    let union = take(crate::capi::kine_document_ink_union(
+        handle,
+        std::ptr::null(),
+        6,
+        1.0,
+        120,
+        80,
+    ))
+    .expect("union ink");
     let union: serde_json::Value = serde_json::from_slice(&union).unwrap();
     close(&union, "x", 20.0 / 120.0);
     close(&union, "width", 72.0 / 120.0);
@@ -2373,21 +2440,38 @@ fn layout_size_reports_grown_canvas_for_overflowing_text() {
     assert!(handle > 0, "{}", last_error());
 
     let short = CString::new(r#"{ "text": "One" }"#).unwrap();
-    let size = take(crate::capi::kine_document_layout_size(handle, short.as_ptr()))
-        .expect("layout size (short)");
+    let size = take(crate::capi::kine_document_layout_size(
+        handle,
+        short.as_ptr(),
+    ))
+    .expect("layout size (short)");
     let size: serde_json::Value = serde_json::from_slice(&size).unwrap();
     assert_eq!(size["width"].as_f64().unwrap(), 400.0);
-    assert_eq!(size["height"].as_f64().unwrap(), 100.0, "fitting text must not grow the canvas");
+    assert_eq!(
+        size["height"].as_f64().unwrap(),
+        100.0,
+        "fitting text must not grow the canvas"
+    );
     assert_eq!(size["y"].as_f64().unwrap(), 0.0);
 
     let tall = CString::new(r#"{ "text": "One\nTwo\nThree\nFour\nFive" }"#).unwrap();
-    let size = take(crate::capi::kine_document_layout_size(handle, tall.as_ptr()))
-        .expect("layout size (tall)");
+    let size = take(crate::capi::kine_document_layout_size(
+        handle,
+        tall.as_ptr(),
+    ))
+    .expect("layout size (tall)");
     let size: serde_json::Value = serde_json::from_slice(&size).unwrap();
     let height = size["height"].as_f64().unwrap();
     let y = size["y"].as_f64().unwrap();
-    assert_eq!(size["width"].as_f64().unwrap(), 400.0, "wrap means width never grows");
-    assert!(height > 200.0, "five 40pt lines must grow the canvas well past 100 (got {height})");
+    assert_eq!(
+        size["width"].as_f64().unwrap(),
+        400.0,
+        "wrap means width never grows"
+    );
+    assert!(
+        height > 200.0,
+        "five 40pt lines must grow the canvas well past 100 (got {height})"
+    );
     assert!(y < -40.0, "center valign grows half upward (got y {y})");
     assert!(
         (y.abs() * 2.0 + 100.0 - height).abs() < 1.0,
@@ -2430,20 +2514,33 @@ fn viewport_render_recovers_text_the_default_canvas_crops() {
     // ascenders above y=0 are gone. Prove the crop by total coverage instead:
     // the default render must hold FEWER ink pixels than the grown viewport.
     let plain = take(crate::capi::kine_document_render_rgba(
-        handle, 0.0, signals.as_ptr(), 400, 100,
+        handle,
+        0.0,
+        signals.as_ptr(),
+        400,
+        100,
     ))
     .expect("default render");
     let plain_ink = alpha_in_band(&plain, 400, 0, 100);
 
     // Grown viewport at the layout-size answer: every line inside the target.
-    let size = take(crate::capi::kine_document_layout_size(handle, signals.as_ptr()))
-        .expect("layout size");
+    let size = take(crate::capi::kine_document_layout_size(
+        handle,
+        signals.as_ptr(),
+    ))
+    .expect("layout size");
     let size: serde_json::Value = serde_json::from_slice(&size).unwrap();
     let view_y = size["y"].as_f64().unwrap();
     let view_h = size["height"].as_f64().unwrap();
     let target_h = view_h.ceil() as u32;
     let grown = take(crate::capi::kine_document_render_rgba_viewport(
-        handle, 0.0, signals.as_ptr(), 400, target_h, view_y, view_h,
+        handle,
+        0.0,
+        signals.as_ptr(),
+        400,
+        target_h,
+        view_y,
+        view_h,
     ))
     .expect("viewport render");
     let grown_ink = alpha_in_band(&grown, 400, 0, target_h as usize);
@@ -2455,9 +2552,15 @@ fn viewport_render_recovers_text_the_default_canvas_crops() {
     // And the recovered ink includes the TOP line: the first 40 design-px of
     // the grown viewport (above the old canvas origin) must hold glyphs.
     let above_origin_rows = (-view_y).floor() as usize;
-    assert!(above_origin_rows > 20, "growth must extend above the origin");
+    assert!(
+        above_origin_rows > 20,
+        "growth must extend above the origin"
+    );
     let top_ink = alpha_in_band(&grown, 400, 0, above_origin_rows);
-    assert!(top_ink > 0, "the once-cropped first line must render above the old origin");
+    assert!(
+        top_ink > 0,
+        "the once-cropped first line must render above the old origin"
+    );
 
     crate::capi::kine_document_free(handle);
 }
@@ -2478,13 +2581,26 @@ fn ink_union_measures_grown_text_instead_of_cropping_at_the_design_box() {
     assert!(handle > 0, "{}", last_error());
     let signals = CString::new(r#"{ "text": "One\nTwo\nThree\nFour\nFive" }"#).unwrap();
 
-    let ink = take(crate::capi::kine_document_ink_union(handle, signals.as_ptr(), 1, 0.0, 200, 50))
-        .expect("ink");
+    let ink = take(crate::capi::kine_document_ink_union(
+        handle,
+        signals.as_ptr(),
+        1,
+        0.0,
+        200,
+        50,
+    ))
+    .expect("ink");
     let ink: serde_json::Value = serde_json::from_slice(&ink).unwrap();
     let canvas_h = ink["canvasHeight"].as_f64().unwrap();
     let canvas_y = ink["canvasY"].as_f64().unwrap();
-    assert!(canvas_h > 200.0, "probe canvas must be the GROWN box (got {canvas_h})");
-    assert!(canvas_y < -40.0, "grown box extends above the design origin (got {canvas_y})");
+    assert!(
+        canvas_h > 200.0,
+        "probe canvas must be the GROWN box (got {canvas_h})"
+    );
+    assert!(
+        canvas_y < -40.0,
+        "grown box extends above the design origin (got {canvas_y})"
+    );
     // Five lines fill most of the grown box vertically — nothing cropped.
     let h = ink["height"].as_f64().unwrap();
     assert!(h > 0.8, "ink must span the grown canvas, got fraction {h}");
@@ -2516,13 +2632,12 @@ fn embedded_inter_renders_without_registration() {
     assert!(inked > 100, "embedded Inter drew no glyph pixels ({inked})");
 }
 
-
 // --- GPU flavor availability (both feature sets) ---------------------------------
 
 /// `kine_gpu_available` is the ONE gpu symbol present in every build, so hosts
 /// branch on it instead of probing for symbols they cannot link. It must answer
 /// truthfully for the build it is compiled into — a CPU-only core (ruby gem,
-/// rails server) says 0 and carries no other kine_gpu_* entry point.
+/// CPU-only servers) says 0 and carries no other kine_gpu_* entry point.
 #[test]
 fn gpu_availability_matches_the_build() {
     let expected = i32::from(cfg!(all(feature = "gpu", target_vendor = "apple")));
@@ -2640,7 +2755,15 @@ mod gpu_parity {
         (cpu, gpu)
     }
 
-    fn assert_parity(engine: &mut GpuEngine, name: &str, doc: &str, t: f64, signals: &str, w: u32, h: u32) {
+    fn assert_parity(
+        engine: &mut GpuEngine,
+        name: &str,
+        doc: &str,
+        t: f64,
+        signals: &str,
+        w: u32,
+        h: u32,
+    ) {
         let (cpu, gpu) = both_rasters(engine, doc, t, signals, w, h);
         assert_eq!(
             cpu.len(),
@@ -2656,9 +2779,17 @@ mod gpu_parity {
             .chunks_exact(4)
             .zip(gpu.chunks_exact(4))
             .flat_map(|(a, b)| {
-                let d = (0..4).map(|k| (a[k] as i32 - b[k] as i32).abs()).max().unwrap() as u8;
+                let d = (0..4)
+                    .map(|k| (a[k] as i32 - b[k] as i32).abs())
+                    .max()
+                    .unwrap() as u8;
                 let v = d.saturating_mul(8);
-                [v, if d > 32 { 0 } else { v }, if d > 32 { 0 } else { v }, 255]
+                [
+                    v,
+                    if d > 32 { 0 } else { v },
+                    if d > 32 { 0 } else { v },
+                    255,
+                ]
             })
             .collect();
         write_png(&dir.join(format!("{name}_diff.png")), &heat, w, h);
@@ -2691,14 +2822,35 @@ mod gpu_parity {
         // Feature fixtures, at their declared size, with the same fixed signals
         // the CPU goldens use.
         let features: &[(&str, &str)] = &[
-            ("linear_gradient", include_str!("../tests/fixtures/features/linear_gradient.json")),
-            ("radial_gradient", include_str!("../tests/fixtures/features/radial_gradient.json")),
-            ("stroke_caps_joins", include_str!("../tests/fixtures/features/stroke_caps_joins.json")),
-            ("opacity_layer", include_str!("../tests/fixtures/features/opacity_layer.json")),
-            ("shadow", include_str!("../tests/fixtures/features/shadow.json")),
+            (
+                "linear_gradient",
+                include_str!("../tests/fixtures/features/linear_gradient.json"),
+            ),
+            (
+                "radial_gradient",
+                include_str!("../tests/fixtures/features/radial_gradient.json"),
+            ),
+            (
+                "stroke_caps_joins",
+                include_str!("../tests/fixtures/features/stroke_caps_joins.json"),
+            ),
+            (
+                "opacity_layer",
+                include_str!("../tests/fixtures/features/opacity_layer.json"),
+            ),
+            (
+                "shadow",
+                include_str!("../tests/fixtures/features/shadow.json"),
+            ),
             ("pill", include_str!("../tests/fixtures/features/pill.json")),
-            ("activefill", include_str!("../tests/fixtures/features/activefill.json")),
-            ("glyph_transform", include_str!("../tests/fixtures/features/glyph_transform.json")),
+            (
+                "activefill",
+                include_str!("../tests/fixtures/features/activefill.json"),
+            ),
+            (
+                "glyph_transform",
+                include_str!("../tests/fixtures/features/glyph_transform.json"),
+            ),
             ("opaque_fill", OPAQUE_FILL),
             ("translucent_fill", TRANSLUCENT_FILL),
         ];
@@ -2718,8 +2870,24 @@ mod gpu_parity {
             assert_parity(&mut engine, name, TEST_CARD, t, signals, 512, 512);
         }
 
-        assert_parity(&mut engine, "text_decorations", DECORATIONS, 0.0, "{}", 400, 200);
-        assert_parity(&mut engine, "colors_derivation", COLORS_DERIVATION, 0.0, "{}", 320, 320);
+        assert_parity(
+            &mut engine,
+            "text_decorations",
+            DECORATIONS,
+            0.0,
+            "{}",
+            400,
+            200,
+        );
+        assert_parity(
+            &mut engine,
+            "colors_derivation",
+            COLORS_DERIVATION,
+            0.0,
+            "{}",
+            320,
+            320,
+        );
         assert_parity(&mut engine, "minimal", MINIMAL, 0.0, "{}", 64, 64);
     }
 
@@ -2851,7 +3019,15 @@ mod gpu_parity {
             engine.adapter()
         );
 
-        assert_parity(&mut engine, "host_queue_card", TEST_CARD, 0.5, r#"{"progress":0.5}"#, 512, 512);
+        assert_parity(
+            &mut engine,
+            "host_queue_card",
+            TEST_CARD,
+            0.5,
+            r#"{"progress":0.5}"#,
+            512,
+            512,
+        );
     }
 
     /// Atlas pressure must be ANNOUNCED before it becomes a fallback. Ruled at
@@ -2886,7 +3062,10 @@ mod gpu_parity {
                 0.0,
             )
             .unwrap();
-            if engine.render_rgba(&scene, 32, 32, (0.0, scene.height)).is_err() {
+            if engine
+                .render_rgba(&scene, 32, 32, (0.0, scene.height))
+                .is_err()
+            {
                 break;
             }
             alive.push(compiled);
@@ -2988,7 +3167,15 @@ mod gpu_parity {
         // is what makes the host's CPU fallback a per-document decision rather
         // than a dead engine.
         register_font();
-        assert_parity(&mut engine, "atlas_full_recovery", MINIMAL, 0.0, "{}", 64, 64);
+        assert_parity(
+            &mut engine,
+            "atlas_full_recovery",
+            MINIMAL,
+            0.0,
+            "{}",
+            64,
+            64,
+        );
     }
 
     /// The size guard is shared with the CPU flavor — the GPU path must not
@@ -3005,7 +3192,9 @@ mod gpu_parity {
             0.0,
         )
         .unwrap();
-        assert!(engine.render_rgba(&scene, 0, 64, (0.0, scene.height)).is_err());
+        assert!(engine
+            .render_rgba(&scene, 0, 64, (0.0, scene.height))
+            .is_err());
         assert!(engine
             .render_rgba(&scene, 70_000, 64, (0.0, scene.height))
             .is_err());
@@ -3014,7 +3203,7 @@ mod gpu_parity {
 }
 
 /// A single word wider than its frame cannot break; center alignment must
-/// spill the overflow SYMMETRICALLY (live 2026-08-26: «MOUNTAINS» in a
+/// spill the overflow SYMMETRICALLY (an unbreakable word in a
 /// title card rendered off-center, clipped right — parley's default
 /// refuses to align overflowing lines).
 #[test]
@@ -3040,17 +3229,30 @@ fn center_alignment_centers_an_overflowing_line() {
         for x in 0..400usize {
             let i = (y * 400 + x) * 4;
             if px[i] > 0x80 && px[i + 3] > 0x80 {
-                if min_x.is_none_or(|m| x < m) { min_x = Some(x); }
-                if max_x.is_none_or(|m| x > m) { max_x = Some(x); }
+                if min_x.is_none_or(|m| x < m) {
+                    min_x = Some(x);
+                }
+                if max_x.is_none_or(|m| x > m) {
+                    max_x = Some(x);
+                }
             }
         }
     }
     let (min_x, max_x) = (min_x.expect("ink"), max_x.expect("ink"));
-    assert!(max_x - min_x > 200, "the word must overflow the 200px frame, got {}..{}", min_x, max_x);
+    assert!(
+        max_x - min_x > 200,
+        "the word must overflow the 200px frame, got {}..{}",
+        min_x,
+        max_x
+    );
     let left = min_x as i64;
     let right = 399 - max_x as i64;
-    assert!((left - right).abs() <= 8,
-        "overflow must spill symmetrically around the frame center: left {} vs right {}", left, right);
+    assert!(
+        (left - right).abs() <= 8,
+        "overflow must spill symmetrically around the frame center: left {} vs right {}",
+        left,
+        right
+    );
 }
 
 // --- admit: the author's door (SCHEMA §10) ------------------------------------------
@@ -3061,7 +3263,10 @@ fn admit(doc: &str) -> Option<serde_json::Value> {
 }
 
 fn admitted_document(admission: &serde_json::Value) -> String {
-    admission["document"].as_str().expect("the admission carries the document text").to_owned()
+    admission["document"]
+        .as_str()
+        .expect("the admission carries the document text")
+        .to_owned()
 }
 
 fn repair_rules(admission: &serde_json::Value) -> Vec<(String, String)> {
@@ -3103,8 +3308,16 @@ fn admit_leaves_every_valid_document_byte_for_byte() {
     for dir in ["tests/fixtures", "tests/fixtures/features", "../docs"] {
         for (name, doc) in corpus(dir) {
             let admission = admit(&doc).unwrap_or_else(|| panic!("{dir}/{name}: {}", last_error()));
-            assert_eq!(repair_rules(&admission), vec![], "{dir}/{name} needed no repair");
-            assert_eq!(admitted_document(&admission), doc, "{dir}/{name} came back as written");
+            assert_eq!(
+                repair_rules(&admission),
+                vec![],
+                "{dir}/{name} needed no repair"
+            );
+            assert_eq!(
+                admitted_document(&admission),
+                doc,
+                "{dir}/{name} came back as written"
+            );
             // `missingFonts` is registry state, and other tests register fonts concurrently.
             let without_registry = |mut interface: serde_json::Value| {
                 interface.as_object_mut().unwrap().remove("missingFonts");
@@ -3130,11 +3343,18 @@ fn admit_over_the_invalid_corpus_repairs_only_what_has_one_reading() {
         if repairable.contains(&name.as_str()) {
             let admission = admission.unwrap_or_else(|| panic!("{name}: {admit_error}"));
             assert_eq!(repair_rules(&admission).len(), 1, "{name}: one repair");
-            assert!(probe(&admitted_document(&admission)).is_some(), "{name}: the repaired document probes green");
+            assert!(
+                probe(&admitted_document(&admission)).is_some(),
+                "{name}: the repaired document probes green"
+            );
         } else {
             assert!(admission.is_none(), "{name}: refused");
             assert!(probe(&doc).is_none(), "{name}: the probe refuses it too");
-            assert_eq!(admit_error, last_error(), "{name}: in the probe's own words");
+            assert_eq!(
+                admit_error,
+                last_error(),
+                "{name}: in the probe's own words"
+            );
         }
     }
 }
@@ -3148,8 +3368,14 @@ fn admit_holds_a_track_that_starts_late_and_ends_early() {
     assert_eq!(
         repair_rules(&admission),
         vec![
-            ("animators[0].keyframes".to_owned(), "keyframes-span".to_owned()),
-            ("animators[1].keyframes".to_owned(), "keyframes-span".to_owned()),
+            (
+                "animators[0].keyframes".to_owned(),
+                "keyframes-span".to_owned()
+            ),
+            (
+                "animators[1].keyframes".to_owned(),
+                "keyframes-span".to_owned()
+            ),
         ]
     );
     assert_eq!(
@@ -3165,22 +3391,48 @@ fn admit_holds_a_track_that_starts_late_and_ends_early() {
 
 #[test]
 fn a_held_track_renders_what_the_evaluator_already_drew() {
-    let key = |at: f64, value: f64, ease: Option<Curve>| MapKey { at, value: MapValue::Num(value), ease };
+    let key = |at: f64, value: f64, ease: Option<Curve>| MapKey {
+        at,
+        value: MapValue::Num(value),
+        ease,
+    };
     let windowed = ValueMap {
-        keys: vec![key(0.15, 0.0, None), key(0.5, 1.0, Some(Curve::Bezier { x1: 0.0, y1: 0.0, x2: 0.58, y2: 1.0 }))],
+        keys: vec![
+            key(0.15, 0.0, None),
+            key(
+                0.5,
+                1.0,
+                Some(Curve::Bezier {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 0.58,
+                    y2: 1.0,
+                }),
+            ),
+        ],
     };
     let held = ValueMap {
         keys: vec![
             key(0.0, 0.0, None),
             key(0.15, 0.0, None),
-            key(0.5, 1.0, Some(Curve::Bezier { x1: 0.0, y1: 0.0, x2: 0.58, y2: 1.0 })),
+            key(
+                0.5,
+                1.0,
+                Some(Curve::Bezier {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 0.58,
+                    y2: 1.0,
+                }),
+            ),
             key(1.0, 1.0, None),
         ],
     };
     let space = InterpSpace::default();
     for step in 0..=100 {
         let u = step as f64 / 100.0;
-        let (MapValue::Num(a), MapValue::Num(b)) = (windowed.eval(u, space), held.eval(u, space)) else {
+        let (MapValue::Num(a), MapValue::Num(b)) = (windowed.eval(u, space), held.eval(u, space))
+        else {
             panic!()
         };
         assert_eq!(a, b, "u = {u}");
@@ -3195,7 +3447,10 @@ fn admit_settles_an_unsettled_envelope() {
     assert_eq!(document["inputs"][0]["default"], 1);
     assert_eq!(
         repair_rules(&admission),
-        vec![("inputs[0].default".to_owned(), "settled-envelope".to_owned())]
+        vec![(
+            "inputs[0].default".to_owned(),
+            "settled-envelope".to_owned()
+        )]
     );
     assert_eq!(
         admission["repairs"][0]["message"],
@@ -3290,7 +3545,9 @@ fn admit_refuses_what_has_two_readings() {
         ),
         (
             "an input no host drives",
-            with_animator(r#"{ "target": "dot", "property": "opacity", "driver": "reveal", "from": 0, "to": 1 }"#),
+            with_animator(
+                r#"{ "target": "dot", "property": "opacity", "driver": "reveal", "from": 0, "to": 1 }"#,
+            ),
             "undeclared input \"reveal\"",
         ),
         (
@@ -3307,6 +3564,9 @@ fn admit_refuses_what_has_two_readings() {
     for (case, doc, expected) in cases {
         assert!(admit(&doc).is_none(), "{case}: refused");
         let error = last_error();
-        assert!(error.contains(expected), "{case}: {error:?} does not contain {expected:?}");
+        assert!(
+            error.contains(expected),
+            "{case}: {error:?} does not contain {expected:?}"
+        );
     }
 }

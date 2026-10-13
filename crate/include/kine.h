@@ -139,7 +139,7 @@ void kine_document_free(int64_t handle);
 
 /* Whether this build carries the GPU flavor. ALWAYS present — hosts branch on
  * this rather than probing for symbols, because a CPU-only build (the ruby gem,
- * the rails server) has none of the kine_gpu_* entry points below. Returns 1
+ * CPU-only servers) has none of the kine_gpu_* entry points below. Returns 1
  * when the flavor is compiled in, 0 otherwise. */
 int32_t kine_gpu_available(void);
 

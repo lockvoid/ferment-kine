@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use vello_common::filter_effects::{Filter, FilterFunction};
 use vello_common::paint::{Image, ImageSource, PaintType};
-use vello_cpu::kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape as KurboShape, Stroke, Vec2};
+use vello_cpu::kurbo::{
+    Affine, BezPath, Point, Rect, RoundedRect, Shape as KurboShape, Stroke, Vec2,
+};
 use vello_cpu::peniko::color::DynamicColor;
 use vello_cpu::peniko::{ColorStop, Gradient, ImageSampler};
 use vello_cpu::{Glyph, Pixmap, RenderContext, RenderSettings, Resources};
@@ -22,11 +24,11 @@ use parley::{
     LineHeight, PositionedLayoutItem, StyleProperty,
 };
 
+use crate::bubble;
 use crate::eval::{
     self, stagger_weights, Color, MapValue, RImage, RNode, RPaint, RShape, RText, RUnitAnimator,
     RWeight, Scene, UnitProperty,
 };
-use crate::bubble;
 use crate::fonts;
 use crate::schema::{Align, Fit, LineCap, LineJoin, VAlign};
 use crate::validate::UnitLevel;
@@ -157,9 +159,17 @@ pub fn render_png(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>, Str
 }
 
 fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>, png::EncodingError> {
-    let straight: Vec<u8> = pixmap.data().iter().flat_map(|pixel| unpremultiply(*pixel)).collect();
+    let straight: Vec<u8> = pixmap
+        .data()
+        .iter()
+        .flat_map(|pixel| unpremultiply(*pixel))
+        .collect();
     let mut data = Vec::new();
-    let mut encoder = png::Encoder::new(&mut data, u32::from(pixmap.width()), u32::from(pixmap.height()));
+    let mut encoder = png::Encoder::new(
+        &mut data,
+        u32::from(pixmap.width()),
+        u32::from(pixmap.height()),
+    );
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header()?;
@@ -571,12 +581,9 @@ fn build_layout(
         // A single word wider than the frame cannot break; parley's default
         // refuses to align overflowing lines (they fall back to LEFT), which
         // spills the overflow entirely to the RIGHT of a centered frame —
-        // live 2026-08-26: «MOUNTAINS» at 160px in a 920px frame read as
-        // off-center and clipped one-sided. Center means center: overflow
-        // spills symmetrically.
+        // Centered overflow should spill symmetrically beyond the frame.
         AlignmentOptions {
             align_when_overflowing: true,
-            ..AlignmentOptions::default()
         },
     );
     Ok(layout)
@@ -658,7 +665,6 @@ fn draw_text<C: Canvas>(canvas: &mut C, text: &RText, parent: Affine) -> Result<
     let mut line_boxes: Vec<Rect> = Vec::new();
     let mut word_count = 0usize;
     let mut glyph_unit_count = 0usize;
-    let mut previous_was_space = true;
 
     for (line_index, line) in layout.lines().enumerate() {
         let metrics = line.metrics();
@@ -668,7 +674,7 @@ fn draw_text<C: Canvas>(canvas: &mut C, text: &RText, parent: Affine) -> Result<
         // A line boundary always ends a word — an explicit "\n" carries no
         // space cluster, and a word bleeding across lines would drag hulls,
         // pills and word-animators out to the block extents.
-        previous_was_space = true;
+        let mut previous_was_space = true;
 
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
@@ -908,10 +914,10 @@ fn draw_text<C: Canvas>(canvas: &mut C, text: &RText, parent: Affine) -> Result<
                 .enumerate()
                 .filter_map(|(line, hull)| {
                     hull.map(|rect| {
-                        let affine =
-                            transforms[2][line].affine_about(line_boxes[line].center());
-                        affine
-                            .transform_rect_bbox(rect.inflate(backdrop.padding_x, backdrop.padding_y))
+                        let affine = transforms[2][line].affine_about(line_boxes[line].center());
+                        affine.transform_rect_bbox(
+                            rect.inflate(backdrop.padding_x, backdrop.padding_y),
+                        )
                     })
                 })
                 .collect();
@@ -1076,7 +1082,12 @@ fn draw_glyph<C: Canvas>(
 /// definition of "ink" shared by every consumer (selection boxes, sticker
 /// normalization, preview blank-frame trimming) — hosts must not grow their
 /// own drifting scans.
-pub fn ink_bounds_rgba(rgba: &[u8], width: u32, height: u32, threshold: u8) -> Option<(u32, u32, u32, u32)> {
+pub fn ink_bounds_rgba(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    threshold: u8,
+) -> Option<(u32, u32, u32, u32)> {
     let (w, h) = (width as usize, height as usize);
     if rgba.len() < w * h * 4 {
         return None;
@@ -1088,12 +1099,20 @@ pub fn ink_bounds_rgba(rgba: &[u8], width: u32, height: u32, threshold: u8) -> O
         for x in 0..w {
             if rgba[row + x * 4 + 3] > threshold {
                 found = true;
-                if x < min_x { min_x = x; }
-                if x > max_x { max_x = x; }
-                if y < min_y { min_y = y; }
-                if y > max_y { max_y = y; }
+                if x < min_x {
+                    min_x = x;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
             }
         }
     }
-    found.then(|| (min_x as u32, min_y as u32, max_x as u32, max_y as u32))
+    found.then_some((min_x as u32, min_y as u32, max_x as u32, max_y as u32))
 }
